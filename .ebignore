@@ -1,0 +1,14 @@
+.git
+.gitignore
+.elasticbeanstalk
+*.zip
+deploy_log.zip
+deploy_log_extracted
+cluster-trust.json
+node-trust.json
+obs-trust.json
+LICENSE
+README.md
+__pycache__
+*.pyc
+app-v1.zip
