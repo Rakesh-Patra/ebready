@@ -1,0 +1,327 @@
+Metadata-Version: 2.4
+Name: ebkit
+Version: 0.1.0
+Summary: AI-powered deployment-kit generator for AWS Elastic Beanstalk
+License: MIT
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: click>=8.1
+Requires-Dist: pydantic>=2.7
+Requires-Dist: jinja2>=3.1
+Provides-Extra: openai
+Requires-Dist: openai>=1.0; extra == "openai"
+Provides-Extra: google
+Requires-Dist: google-generativeai>=0.7; extra == "google"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-cov>=5.0; extra == "dev"
+Dynamic: license-file
+
+# EBReady
+
+EBReady is a platform designed to simplify deploying applications to AWS Elastic Beanstalk Cluster Mode environments.
+
+---
+
+## Day 1 — Deployed FastAPI Hello World ✅
+
+Deployed a minimal FastAPI application to an existing AWS Elastic Beanstalk Cluster Mode (Amazon EKS) environment.
+
+- **Region:** `us-east-2`
+- **Application:** `ebready`
+- **Environment:** `ebready-dev`
+- **Live URL:** `http://ebready-dev.eba-unb4v5ht.us-east-2.elasticbeanstalk.com`
+
+---
+
+## Day 2 — AI-Powered Deployment Kit Generator ✅
+
+EBKit is the AI-powered deployment-kit generator built inside EBReady.
+
+---
+
+## Architecture
+
+```
+Repository
+    │
+    ▼
+┌─────────────────────┐
+│  ProjectScanner      │  Heuristic file inspection — no AI
+│  (scanner.py)        │  Detects: language, framework, port,
+└──────────┬──────────┘  entrypoints, dep files, existing artefacts
+           │
+           ▼  ScanResult (structured dict)
+┌─────────────────────┐
+│  AIAnalyzer          │  AI reasons over ScanResult only
+│  (ai_analyzer.py)    │  Returns ONLY structured JSON
+│                      │  ┌──────────────┐
+│  Backends:           │  │ OpenAI       │
+│  • MockAIAnalyzer    │  │ Google Gemini│
+│  • OpenAIAnalyzer    │  │ (mock: local)│
+│  • GoogleAIAnalyzer  │  └──────────────┘
+└──────────┬──────────┘
+           │
+           ▼  Raw JSON
+┌─────────────────────┐
+│  Pydantic Validation │  Strict schema — rejects hallucinations,
+│  (DeploymentConfig)  │  shell injection, secret values, bad enums
+└──────────┬──────────┘
+           │
+           ▼  Validated DeploymentConfig
+┌─────────────────────┐
+│  Jinja2 Renderer     │  Templates generate ALL file content
+│  (renderer.py)       │  AI never touches file generation
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────────────────────────┐
+│  Deployment Kit                          │
+│  ├── Dockerfile                          │
+│  ├── Procfile                            │
+│  ├── .ebignore                           │
+│  ├── .env.example                        │
+│  └── .ebextensions/config.yml            │
+└─────────────────────────────────────────┘
+```
+
+### Why This Architecture?
+
+**AI does NOT write deployment files directly.**
+
+The AI only fills in a structured `DeploymentConfig` JSON object.  Pydantic
+validates every field with strict rules before any file is generated.  Jinja2
+templates then render the actual deployment files.  This means:
+
+- AI hallucinations cannot produce malformed Dockerfiles
+- Shell injection via `start_command` is explicitly rejected
+- Secret values can never leak into `.env.example`
+- Templates are version-controlled and auditable
+- Swapping AI backends requires zero template changes
+
+---
+
+## How AI Is Used
+
+The AI receives the **scan result** (structured metadata about the repository) and is instructed to:
+
+- Return ONLY structured JSON matching `DeploymentConfig`
+- Prefer evidence from the scanned repository
+- Mark uncertain fields explicitly rather than inventing values
+- Never generate file content directly
+
+The system prompt:
+
+> "You are a deployment configuration analyzer. Analyze the supplied project
+> metadata and determine the safest deployment configuration. Return ONLY
+> structured JSON. Do not generate Dockerfiles. Do not generate shell commands.
+> Do not invent dependencies. If information is uncertain, explicitly mark it."
+
+---
+
+## Why Jinja2?
+
+- **Separation of concerns** — templates are separate from logic
+- **Auditable** — every generated file has a traceable template source
+- **Multi-language** — same renderer handles Python/Node.js/Go configs
+- **Safe** — `StrictUndefined` raises errors on missing template variables
+- **Hackathon-friendly** — templates are plain text, easy to edit
+
+---
+
+## Installation
+
+```bash
+# Clone the repo
+git clone <repo-url>
+cd ebready
+
+# Install ebkit
+pip install -e ".[dev]"
+
+# Verify
+ebkit --help
+```
+
+---
+
+## Usage
+
+### `ebkit init`
+
+```
+$ ebkit init
+
+🔍 Analyzing project...
+
+📋 Detected project information:
+   Language       : python
+   Framework      : fastapi
+   Runtime        : 3.12
+   Package manager: pip
+   Dependency file: requirements.txt
+   Entrypoint     : app/main.py
+   Port           : 8080
+   Start command  : uvicorn app.main:app --host 0.0.0.0 --port 8080
+
+🤖 Running AI analysis...
+   Backend: MockAIAnalyzer
+
+🤖 AI-proposed DeploymentConfig:
+   Language       : python
+   Framework      : fastapi
+   Runtime        : 3.12
+   Package manager: pip
+   Dependency file: requirements.txt
+   Entrypoint     : app/main.py
+   Port           : 8080
+   Start command  : uvicorn app.main:app --host 0.0.0.0 --port 8080
+   Health check   : /health
+   Platform       : linux/amd64
+   Base image     : python:3.12-slim
+
+🚀 Generate deployment kit with this configuration? [Y/n]:
+
+⚙️  Rendering templates...
+
+✅ Deployment kit generated successfully.
+
+   Output directory: /path/to/project
+
+   Generated:
+      ✓ Dockerfile          [created]
+      ✓ Procfile            [created]
+      ✓ .ebignore           [created]
+      ✓ .env.example        [created]
+      ✓ .ebextensions/config.yml  [created]
+
+   Next steps:
+      1. Review the generated files.
+      2. Copy .env.example → .env and fill in real values.
+      3. Build and test your Docker image locally.
+      4. Deploy with `eb deploy` or your CI/CD pipeline.
+```
+
+### Options
+
+```
+ebkit init --help
+
+Options:
+  -p, --path PATH      Path to the project repo root  [default: .]
+  -o, --output PATH    Output directory (defaults to project root)
+  -a, --analyzer TEXT  AI backend: openai | google | mock
+  -f, --force          Overwrite existing files without prompting
+  -y, --yes            Skip confirmation prompts
+```
+
+---
+
+## Generated Files
+
+| File | Purpose |
+|------|---------|
+| `Dockerfile` | Multi-language Docker build (Python/Node.js), platform-aware |
+| `Procfile` | Elastic Beanstalk web process definition |
+| `.ebignore` | Excludes dev files, secrets, and CI artefacts from EB bundles |
+| `.env.example` | Documents required env var KEYS — never contains values |
+| `.ebextensions/config.yml` | EB health check path and environment variable configuration |
+
+---
+
+## AI Backends
+
+| Backend | Env Var Required | Notes |
+|---------|-----------------|-------|
+| `MockAIAnalyzer` | None | Rule-based, deterministic, works offline |
+| `OpenAIAnalyzer` | `OPENAI_API_KEY` | Uses `gpt-4o-mini` by default |
+| `GoogleAIAnalyzer` | `GOOGLE_API_KEY` or `GEMINI_API_KEY` | Uses `gemini-2.0-flash` |
+
+Auto-detection order: OpenAI → Google → Mock.
+
+Force a backend: `ebkit init --analyzer mock`
+
+---
+
+## Safety Behaviour
+
+- **Existing files protected** — `Dockerfile`, `Procfile`, `.ebextensions/`, `.env` are never silently overwritten.  You are prompted for each.
+- **Secrets never exposed** — `.env` files are detected but never read.  Only key names appear in `.env.example`.
+- **No shell injection** — `start_command` is validated to reject `$()`, backticks, `&&`, `||`, pipes, and semicolons.
+- **No auto-execution** — generated commands are never run automatically.
+- **Pydantic validation** — every AI response is parsed and validated before reaching the template renderer.
+
+---
+
+## Running Tests
+
+```bash
+pytest tests/ -v
+```
+
+Test coverage includes:
+
+1. FastAPI repository detection
+2. Node.js repository detection
+3. DeploymentConfig validation
+4. Invalid AI output rejection
+5. Jinja2 rendering
+6. Generated Dockerfile content
+7. Generated Procfile content
+8. Existing deployment file safety
+9. Missing project information
+10. Secret/environment variable handling
+11. Golden end-to-end test (real EBReady FastAPI project)
+
+---
+
+## Project Structure
+
+```
+ebready/
+├── ebkit/
+│   ├── cli.py                  # CLI entry point (ebkit command)
+│   ├── analyzer/
+│   │   ├── scanner.py          # Heuristic repository scanner
+│   │   └── ai_analyzer.py      # AI abstraction + Mock/OpenAI/Google
+│   ├── models/
+│   │   └── deployment_config.py # Strict Pydantic schema
+│   ├── generator/
+│   │   ├── renderer.py         # Jinja2 template renderer
+│   │   └── templates/
+│   │       ├── Dockerfile.j2
+│   │       ├── Procfile.j2
+│   │       ├── ebignore.j2
+│   │       ├── env.example.j2
+│   │       └── ebextensions/
+│   │           └── config.yml.j2
+│   └── commands/
+│       └── init.py             # ebkit init implementation
+├── tests/
+│   └── test_ebkit.py
+├── app/                        # EBReady FastAPI hello-world app
+│   └── main.py
+├── requirements.txt
+└── pyproject.toml
+```
+
+---
+
+## Current Limitations
+
+- `ebkit init` generates files only — it does NOT deploy to AWS.
+- The MockAIAnalyzer uses simple heuristics; real AI backends produce better results for complex projects.
+- Django projects require manual review of the generated `start_command` (project name unknown at scan time).
+- Multi-stage Dockerfile builds not yet supported.
+- No support for monorepos with multiple services.
+
+---
+
+## PLANNED (Day 3+)
+
+- GitHub Actions workflow generation
+- `ebkit deploy` — push to ECR and trigger EB update
+- AI failure recovery (diagnose failed deployments)
+- Multi-service / monorepo support
+- Real-AI golden test (with GOOGLE_API_KEY)

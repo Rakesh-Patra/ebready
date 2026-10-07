@@ -1,0 +1,2 @@
+[console_scripts]
+ebkit = ebkit.cli:main
