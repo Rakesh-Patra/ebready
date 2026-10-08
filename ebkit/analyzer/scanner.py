@@ -706,6 +706,39 @@ class ProjectScanner:
                         result.notes.append(f"Application port {compose_ports[0]} detected from {compose_file}.")
                         break
 
+        # Scan subdirectory Dockerfiles (frontend/, backend/, app/, src/, etc.)
+        # Prefer frontend/web-facing ports (3000, 4173, 8080, 80) over backend-only ports
+        if not result.detected_port:
+            _FRONTEND_DIRS = ("frontend", "web", "client", "ui", "app", "src")
+            _BACKEND_DIRS = ("backend", "api", "server", "service")
+            frontend_port: Optional[int] = None
+            backend_port: Optional[int] = None
+            for subdir in self.repo_path.iterdir():
+                if not subdir.is_dir():
+                    continue
+                df = subdir / "Dockerfile"
+                if not df.exists():
+                    df = subdir / "dockerfile"
+                if not df.exists():
+                    continue
+                try:
+                    df_text = df.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                exposed, cmd_ports = extract_dockerfile_ports(df_text)
+                port = (exposed or cmd_ports or [None])[0]
+                if port is None:
+                    continue
+                name = subdir.name.lower()
+                if any(name.startswith(d) for d in _FRONTEND_DIRS) and frontend_port is None:
+                    frontend_port = port
+                    result.notes.append(f"Port {port} detected from {subdir.name}/Dockerfile (frontend).")
+                elif any(name.startswith(d) for d in _BACKEND_DIRS) and backend_port is None:
+                    backend_port = port
+                    result.notes.append(f"Port {port} detected from {subdir.name}/Dockerfile (backend).")
+            # Prefer frontend port; fall back to backend
+            result.detected_port = frontend_port or backend_port
+
     # ------------------------------------------------------------------
     # Environment file detection (names only, no values)
     # ------------------------------------------------------------------
