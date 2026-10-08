@@ -22,7 +22,7 @@ from typing import Dict, List, Optional, Tuple
 
 import boto3
 import click
-from botocore.exceptions import ClientError, NoCredentialsError
+from botocore.exceptions import ClientError, NoCredentialsError, ParamValidationError
 
 from ebkit.config import load_config
 from ebkit.repo_handler import safe_clone_repo, validate_github_url
@@ -447,6 +447,7 @@ def _ensure_cluster_environment(
     create_args = {
         "ApplicationName": app_name,
         "EnvironmentName": env_name,
+        "VersionLabel": version_label,
         "Tier": {"Name": "Cluster", "Type": "EKS"},
         "OptionSettings": option_settings,
     }
@@ -456,47 +457,54 @@ def _ensure_cluster_environment(
 
 
 
-def _get_eb_storage_bucket(eb_client, region: str) -> str:
-    try:
-        return eb_client.create_storage_location()["S3Bucket"]
-    except Exception:
-        sts = boto3.client("sts")
-        acc = sts.get_caller_identity()["Account"]
-        return f"elasticbeanstalk-{region}-{acc}"
-
-
-def _generate_dockerrun_manifest(image_uri: str, port: int = 8080) -> str:
-    return json.dumps({
-        "AWSEBDockerrunVersion": "1",
-        "Image": {"Name": image_uri, "Update": "true"},
-        "Ports": [{"ContainerPort": port}],
-    }, indent=2)
-
-
-def _upload_dockerrun_to_s3(s3_client, bucket: str, app_name: str, version_label: str, content: str) -> str:
-    key = f"{app_name}/{version_label}-Dockerrun.aws.json"
-    s3_client.put_object(Bucket=bucket, Key=key, Body=content.encode("utf-8"), ContentType="application/json")
-    return key
-
-
 def _register_cluster_version(
-    eb_client, app_name: str, version_label: str, bucket: str, key: str, image_uri: str
+    eb_client, app_name: str, version_label: str, image_uri: str, region: str
 ) -> None:
+    version_args = {
+        "ApplicationName": app_name,
+        "VersionLabel": version_label,
+        "Description": f"EBReady Cluster deployment: {image_uri}",
+        "ImageConfiguration": {"Source": {"Uri": image_uri}},
+        "AutoCreateApplication": True,
+    }
     try:
-        eb_client.create_application_version(
-            ApplicationName=app_name,
-            VersionLabel=version_label,
-            Description=f"EBReady Cluster deployment: {image_uri}",
-            SourceBundle={"S3Bucket": bucket, "S3Key": key},
-            AutoCreateApplication=True,
-            Process=True,
-        )
-        _ok(f"Application version '{version_label}' registered.")
+        eb_client.create_application_version(**version_args)
+    except ParamValidationError:
+        command = [
+            "aws",
+            "elasticbeanstalk",
+            "create-application-version",
+            "--application-name",
+            app_name,
+            "--version-label",
+            version_label,
+            "--description",
+            version_args["Description"],
+            "--image-configuration",
+            json.dumps(version_args["ImageConfiguration"]),
+            "--region",
+            region,
+            "--no-cli-pager",
+        ]
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        if result.returncode:
+            error = result.stderr.strip() or result.stdout.strip()
+            if "already exists" in error.lower():
+                _info(f"Application version '{version_label}' already exists — reusing.")
+                return
+            raise RuntimeError(f"AWS CLI could not register application version: {error}")
     except ClientError as exc:
         if "already exists" in str(exc).lower():
             _info(f"Application version '{version_label}' already exists — reusing.")
-        else:
-            raise
+            return
+        raise
+    _ok(f"Application version '{version_label}' registered.")
+
+
+def _make_application_version_label(image_uri: str) -> str:
+    version_tag = image_uri.rsplit(":", 1)[-1]
+    version_suffix = str(time.time_ns())
+    return f"{version_tag[:99 - len(version_suffix)]}-{version_suffix}"
 
 
 def _poll_environment_health(eb_client, app_name: str, env_name: str, timeout: int = 1800) -> Dict:
@@ -721,7 +729,7 @@ def _execute_deploy(
         subprocess.run(["docker", "tag", tag, ecr_tag], check=False)
         tag = ecr_tag
 
-    version_label = tag.split(":")[-1] if ":" in tag else timestamp_tag
+    version_label = _make_application_version_label(tag)
 
     # 8. Interactive Review
     if is_interactive:
@@ -746,7 +754,6 @@ def _execute_deploy(
     session = boto3.Session(region_name=region)
     ecr_client = session.client("ecr")
     eb_client = session.client("elasticbeanstalk")
-    s3_client = session.client("s3")
 
     # 10. Build & Push
     if not no_build:
@@ -776,10 +783,7 @@ def _execute_deploy(
 
     # 12. Application & Version
     _ensure_eb_application(eb_client, app)
-    eb_bucket = _get_eb_storage_bucket(eb_client, region)
-    manifest = _generate_dockerrun_manifest(tag, port)
-    s3_key = _upload_dockerrun_to_s3(s3_client, eb_bucket, app, version_label, manifest)
-    _register_cluster_version(eb_client, app, version_label, eb_bucket, s3_key, tag)
+    _register_cluster_version(eb_client, app, version_label, tag, region)
 
     # 13. Write local config
     _write_eb_config(proj_dir, app, env, region)

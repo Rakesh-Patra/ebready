@@ -1,543 +1,213 @@
-# EBKit — Deploy Any App to AWS Elastic Beanstalk Cluster Mode
+# EBKit
 
-**EBKit** is a zero-infra AI-powered deployment tool that builds, validates, and deploys any containerized web application to **AWS Elastic Beanstalk Cluster Mode (EKS)** — no manual AWS setup required.
+EBKit is a command-line tool that helps you prepare a Dockerized application and deploy it to **AWS Elastic Beanstalk Cluster Mode (Amazon EKS)**. It builds and pushes your image to Amazon ECR, creates or updates an Elastic Beanstalk environment, and reports the deployed URL.
 
----
+EBKit runs on your computer and deploys to **your AWS account**. It is not a hosted deployment service. AWS resources may incur charges.
 
-## ✨ Features at a Glance
+## Before you start
 
-| Feature | Description |
-|---|---|
-| 🤖 **AI-Powered Init** | Gemini analyzes your repo and generates production Dockerfiles, Procfiles, and .ebignore |
-| 🔍 **Architecture Detection** | Auto-detects single-tier, multi-tier (frontend/backend/db/cache/worker) topologies |
-| 🚀 **Zero-Infra Deploy** | Auto-provisions EKS Cluster Mode IAM roles and environments — no manual AWS console needed |
-| 🌐 **GitHub URL Support** | `ebkit deploy https://github.com/user/repo` — safe clone + deploy in one command |
-| 🔐 **Env Var Wizard** | Reads `.env`, `--env-file`, `--env KEY=VAL` and interactively prompts for missing secrets |
-| 🛡️ **Security Gate** | Docker Scout CVE scan — 0 critical CVEs enforced before deploy |
-| 🔄 **Self-Healing** | Docker AI (Gordon) auto-repairs broken Dockerfiles |
-| ✅ **Health Polling** | Polls AWS until `Green/Ready` and prints your live URL |
+You will need:
 
----
+- **Python 3.11 or newer**
+- **Git**
+- **Docker Desktop** (Windows/macOS) or Docker Engine (Linux), installed and running
+- **AWS CLI v2**, installed and configured for your AWS account
+- An AWS account with permission to use Elastic Beanstalk Cluster Mode, ECR, IAM, EC2/VPC, and related services
+- A **Gemini API key** only if you plan to run `ebkit init`
 
-## Day 1 — FastAPI Hello World on EB Cluster Mode ✅
+Cluster Mode provisions AWS infrastructure and may cost money while it is running. Review AWS pricing and clean up resources you no longer need. Never share AWS credentials or API keys.
 
-Deployed a minimal FastAPI application to an existing AWS Elastic Beanstalk Cluster Mode (Amazon EKS) environment.
+## Install EBKit
 
-- **Region:** `us-east-2`
-- **Application:** `ebready`
-- **Environment:** `ebready-dev`
-- **Live URL:** `http://ebready-dev.eba-unb4v5ht.us-east-2.elasticbeanstalk.com`
+EBKit is currently installed from this GitHub repository:
 
----
-
-## Day 2 — AI-Powered Deployment Kit Generator ✅
-
-EBKit is the AI-powered deployment-kit generator built inside EBReady.
-
----
-
-## Architecture
-
-```text
-Repository / GitHub URL
-        │
-        ▼
-┌─────────────────────┐
-│  safe_clone_repo     │  GitHub URL validation & safe clone
-│  (repo_handler.py)   │  OR local path passthrough
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│  ProjectScanner      │  Heuristic file inspection — no AI
-│  (scanner.py)        │  Detects: language, framework, port,
-└──────────┬──────────┘  entrypoints, dep files, existing artefacts
-           │
-           ▼  ScanResult (structured dict)
-┌─────────────────────┐
-│  Gemini Analyzer     │  Analyzes project metadata & requirements
-│  (ai_analyzer.py)    │  Returns ONLY structured JSON
-└──────────┬──────────┘
-           │
-           ▼  Raw JSON
-┌─────────────────────┐
-│  Pydantic Validation │  Strict schema — rejects hallucinations,
-│  (DeploymentConfig)  │  shell injection, secret values, bad enums
-└──────────┬──────────┘
-           │
-           ▼  Validated DeploymentConfig
-┌─────────────────────────────────────────────────────────────┐
-│  Generation Layer                                           │
-│  ├── Docker AI (Gordon): Generates production Dockerfile    │
-│  └── Jinja2 Renderer: .dockerignore, Procfile, .ebignore,   │
-│                       .env.example                          │
-└──────────┬──────────────────────────────────────────────────┘
-           │
-           ▼  Deployment Kit (Cluster Mode)
-┌─────────────────────────────────────────────────────────────┐
-│  EBReady Multi-Stage Validation & Security Gate             │
-│  ├── Cross-File & Secret Validation                         │
-│  ├── Docker Build Validation                                │
-│  ├── Container Runtime Health Check (optional)              │
-│  ├── Docker Scout Vulnerability Scan (0 Critical CVEs)      │
-│  └── Cluster Mode Preflight Gate                            │
-└──────────┬──────────────────────────────────────────────────┘
-           │
-    Failure Detected?
-    ├── YES ──► 🔧 Docker AI (Gordon) Diagnoses & Repairs Dockerfile
-    │           └── EBReady re-validates & rebuilds (2–3 attempts max)
-    └── NO  ──► ✅ PROJECT READY FOR DEPLOYMENT
-                        │
-                        ▼
-           ┌─────────────────────────┐
-           │   ebkit deploy          │
-           │  (deploy.py)            │
-           │  ├── ECR push           │
-           │  ├── IAM role setup     │
-           │  ├── EB Cluster create  │
-           │  └── Health polling     │
-           └─────────────────────────┘
-```
-
-### Separation of Responsibilities
-
-- **Gemini** — Analyzes repository metadata, framework, runtime version, entrypoint, and ports to produce a strictly validated `DeploymentConfig`.
-- **Docker AI (Gordon)** — Uses the developer's installed Docker AI agent to generate the production-ready `Dockerfile` and automatically diagnose/repair container build, runtime, and CVE issues.
-- **EBReady** — Validates all artifacts before rebuilding, protects secrets and `.env`, enforces that application source code is never modified, runs the Docker Scout security gate, and evaluates Cluster Mode preflight compatibility.
-
-### Why This Architecture?
-
-**AI does NOT write deployment files directly.**
-
-The AI only fills in a structured `DeploymentConfig` JSON object. Pydantic validates every field with strict rules before any file is generated. Jinja2 templates then render the actual deployment files. This means:
-
-- AI hallucinations cannot produce malformed Dockerfiles
-- Shell injection via `start_command` is explicitly rejected
-- Secret values can never leak into `.env.example`
-- Templates are version-controlled and auditable
-- Swapping AI backends requires zero template changes
-
----
-
-## How AI Is Used
-
-The AI receives the **scan result** (structured metadata about the repository) and is instructed to:
-
-- Return ONLY structured JSON matching `DeploymentConfig`
-- Prefer evidence from the scanned repository
-- Mark uncertain fields explicitly rather than inventing values
-- Never generate file content directly
-
-The system prompt:
-
-> "You are a deployment configuration analyzer. Analyze the supplied project
-> metadata and determine the safest deployment configuration. Return ONLY
-> structured JSON. Do not generate Dockerfiles. Do not generate shell commands.
-> Do not invent dependencies. If information is uncertain, explicitly mark it."
-
----
-
-## Why Jinja2?
-
-- **Separation of concerns** — templates are separate from logic
-- **Auditable** — every generated file has a traceable template source
-- **Multi-language** — same renderer handles Python/Node.js/Go configs
-- **Safe** — `StrictUndefined` raises errors on missing template variables
-- **Hackathon-friendly** — templates are plain text, easy to edit
-
----
-
-## Installation
-
-```bash
-# Clone the repo
+```powershell
 git clone https://github.com/Rakesh-Patra/ebready.git
 cd ebready
-
-# Install ebkit
-pip install -e ".[dev]"
-
-# Verify
+py -m pip install .
 ebkit --help
 ```
 
----
+On macOS or Linux, use `python3 -m pip install .` instead of `py -m pip install .`.
 
-## Configuration & Security
+To install the latest development version later, go to the cloned `ebready` folder and run the install command again. A PyPI package is not currently published.
 
-### API Key Setup (Security-First Design)
+## Set up AWS access
 
-EBKit adheres to a strict **zero-credential-exposure policy**:
-- **No interactive terminal prompts:** EBKit intentionally does not prompt for API keys in the console to prevent credentials from being logged in terminal scrollback, history, or shoulder-surfed.
-- **No plaintext disk storage:** EBKit strictly forbids storing API keys in configuration files (such as `~/.ebkit/config`) or caching credentials locally.
-- **Environment variables only:** API keys must be injected via standard environment variables. This ensures compatibility with CI/CD runners (e.g., GitHub Actions, AWS CodeBuild) and keeps secrets out of version control.
+Install AWS CLI v2 using the [official AWS installation guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), then configure credentials. For local development, AWS IAM Identity Center (SSO) is preferred when your organization provides it; otherwise, follow your organization’s secure credential setup.
 
-Before running `ebkit init`, set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`):
+For an SSO profile:
 
-**Linux / macOS:**
-```bash
-export GEMINI_API_KEY="your-api-key-here"
-```
-
-**Windows (PowerShell):**
 ```powershell
-$env:GEMINI_API_KEY = "your-api-key-here"
+aws configure sso
+aws sso login
+aws sts get-caller-identity
 ```
 
-**Windows (Command Prompt):**
-```cmd
-set GEMINI_API_KEY=your-api-key-here
+For a locally configured credentials profile:
+
+```powershell
+aws configure
+aws sts get-caller-identity
 ```
 
-If neither `GEMINI_API_KEY` nor `GOOGLE_API_KEY` is detected in the environment, `ebkit init` will safely abort and display an error reminding you to set the variable.
+The last command should show the AWS account and identity you intend to use. EBKit uses the AWS credentials available to Boto3 and the AWS CLI. Make sure both are using the same profile/account. Do not paste credentials into source files, command examples, or chat.
 
----
+## Option A: Deploy a project that already has a Dockerfile
 
-## Usage
+Open a terminal in your application folder and deploy:
 
-### Interactive Setup Wizard (Primary UX)
+```powershell
+ebkit deploy . --app my-app --env my-app-cluster --region us-east-2 -y
+```
 
-Run the interactive setup wizard with a single command:
+Replace `my-app` with your application name and choose an AWS region where Elastic Beanstalk Cluster Mode is available. EBKit will:
 
-```bash
+1. Build the Docker image from the project’s `Dockerfile`.
+2. Create or use an ECR repository and push the image.
+3. Register that image as an Elastic Beanstalk Cluster application version.
+4. Create the environment if needed, or deploy the new version to the existing environment.
+5. Wait for the environment to become ready and print its URL.
+
+To deploy a public GitHub repository that already includes a working `Dockerfile`:
+
+```powershell
+ebkit deploy https://github.com/owner/project --app my-app --env my-app-cluster --region us-east-2 -y
+```
+
+You can also run `ebkit deploy` without `-y` to use the interactive prompts.
+
+### Docker image and port
+
+By default, EBKit detects the first `EXPOSE` port in your Dockerfile and uses `8080` if none is found. You can set it explicitly:
+
+```powershell
+ebkit deploy . --app my-app --env my-app-cluster --region us-east-2 --port 8000 -y
+```
+
+Your application must listen on `0.0.0.0` and on the same port you configure.
+
+### Environment variables
+
+EBKit reads a `.env` file in your project folder if present. You can provide another file with `--env-file`:
+
+```powershell
+ebkit deploy . --app my-app --env my-app-cluster --region us-east-2 --env-file .env.production -y
+```
+
+Environment variable values are sent to AWS as part of the environment configuration. Do not commit real `.env` files to source control. For production secrets, use an appropriate AWS secrets-management approach and carefully review who can view environment settings.
+
+### Use an image that is already in ECR
+
+If the image is already pushed to ECR, skip building and pushing it:
+
+```powershell
+ebkit deploy . --app my-app --env my-app-cluster --region us-east-2 --tag 123456789012.dkr.ecr.us-east-2.amazonaws.com/my-app:latest --no-build --no-push -y
+```
+
+Replace the example account ID, region, repository, and tag with your own. The environment’s node role must be allowed to pull the image.
+
+## Option B: Generate deployment files with `ebkit init`
+
+Use this when your project needs a Dockerfile or other deployment files generated. Get a Gemini API key from Google AI Studio and set it in your terminal before running the wizard.
+
+**Windows PowerShell:**
+
+```powershell
+$env:GEMINI_API_KEY = "your-key"
 ebkit init
 ```
 
-The interactive wizard guides you step-by-step:
+**macOS/Linux:**
 
-```text
-$ ebkit init
-
-🚀 Welcome to EBReady
-
-Where is your project?
-
-1. Current directory
-2. GitHub repository
-3. Local project path
-
-Select [1]: 1
-Project path: .
-
-🤖 AI Provider
-
-1. Gemini — ✅ Available
-2. OpenAI — 🔜 Coming Later
-3. Claude — 🔜 Coming Later
-4. Groq API — 🔜 Coming Later
-
-Select [1]: 1
-
-🔍 Scanning project...
-
-✓ Python detected
-✓ FastAPI detected
-✓ requirements.txt detected
-✓ app/main.py detected
-✓ Port 8080 detected
-
-🤖 Running Gemini analysis...
-
-✓ DeploymentConfig generated
-✓ Pydantic validation passed
-✓ Configuration validated
-
-🤖 Docker AI (Gordon) generating Dockerfile...
-
-✓ Dockerfile generated by Docker AI (Gordon)
-
-📦 Generating deployment kit...
-
-✓ Dockerfile
-✓ .dockerignore
-✓ .env.example
-✓ Procfile
-
-🔎 Validating generated artifacts...
-
-✓ Dockerfile validation
-✓ Cross-file validation
-✓ Secret validation
-
-🐳 Docker Build
-
-✓ linux/amd64 image built
-
-🛡 Docker Scout
-
-✓ Security scan completed
-✓ 0 Critical
-✓ 0 High
-✓ Security gate passed
-✓ Cluster Mode preflight
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ PROJECT READY FOR DEPLOYMENT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
----
-
-## Complete End-to-End Workflow
-
-Here is how a developer uses EBReady from start to live deployment:
-
-### 1. Prerequisites
-- **Python 3.10+**
-- **Docker Desktop / Docker Engine** running locally
-- **Gemini API Key** (set via `$env:GEMINI_API_KEY` on Windows or `export GEMINI_API_KEY` on Linux/macOS)
-- **AWS Authentication**:
-  - EB CLI installed (`pip install awsebcli`)
-  - Authenticate to AWS using **any standard method** (EBReady uses AWS STS to auto-detect credentials):
-    - **Option A (Local / Laptop)**: Run `aws configure` (sets `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in `~/.aws/credentials`)
-    - **Option B (EC2 Instance)**: Attach an **IAM Instance Profile / Role** to the EC2 instance with `AWSElasticBeanstalkFullAccess` and `AmazonEC2ContainerRegistryFullAccess` (no `aws configure` needed!)
-    - **Option C (Environment Variables / CI/CD)**: Export `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION`
-
-
-### 2. Step 1: Initialize & Generate Deployment Kit (`ebkit init`)
-In your project directory, launch the interactive setup wizard:
 ```bash
+export GEMINI_API_KEY="your-key"
 ebkit init
 ```
-This automatically:
-1. Scans project code, language, frameworks, entrypoints, and ports.
-2. Runs Gemini AI analysis with strict schema enforcement.
-3. Generates production `Dockerfile`, `.dockerignore`, `Procfile`, `.ebignore`, and `.env.example`.
-4. Executes multi-stage cross-file and secret validation.
-5. Runs a real Docker build (`linux/amd64`) and Docker Scout CVE security gate.
-6. Self-heals with Docker AI (Gordon) if any container or CVE issues arise.
 
-### 3. Step 2: Local Container Verification (`ebkit test`)
-Test and probe the container's runtime health check locally before going to the cloud:
-```bash
-ebkit test
+The wizard scans the project and can generate files such as `Dockerfile`, `.dockerignore`, `Procfile`, `.ebignore`, and `.env.example`. Review generated files before using them. Existing files are protected from being silently overwritten; follow the prompts if a file already exists.
+
+After initialization, deploy from your project directory using the command in [Option A](#option-a-deploy-a-project-that-already-has-a-dockerfile).
+
+## Useful commands
+
+```powershell
+ebkit --help
+ebkit init --help
+ebkit deploy --help
 ```
 
-### 4. Step 3: Deploy to AWS Elastic Beanstalk Cluster Mode (`ebkit deploy`)
+Deploy option summary:
 
-```bash
-# Deploy current directory (interactive wizard)
-ebkit deploy
+| Option | What it does |
+|---|---|
+| `[SOURCE]` | Local project directory or GitHub URL; defaults to the current directory |
+| `--app` | Elastic Beanstalk application name |
+| `--env` | Elastic Beanstalk environment name |
+| `--region` | AWS region |
+| `--tag` | Docker image tag or full image URI |
+| `--repo` | ECR repository name; defaults to the application name |
+| `--port` | Application port; auto-detected from Dockerfile or defaults to `8080` |
+| `--env-file` | Additional environment-variable file |
+| `--no-build` | Do not build a Docker image |
+| `--no-push` | Do not push an image to ECR |
+| `--wait / --no-wait` | Wait for environment status and URL; waits by default |
+| `-y, --yes` | Skip interactive prompts |
 
-# Deploy a GitHub repo directly
-ebkit deploy https://github.com/owner/repo
+## Troubleshooting
 
-# Deploy a local subdirectory non-interactively
-ebkit deploy ./my-app --app my-app --env my-app-dev --region us-east-2 -y
+### AWS credentials or permissions
+
+Run `aws sts get-caller-identity` and confirm you are using the intended account. If access is denied, ask your AWS administrator to grant the permissions required for Elastic Beanstalk Cluster Mode, ECR image push/pull, IAM role setup, and the target network resources.
+
+### Docker is unavailable
+
+Start Docker Desktop or Docker Engine, then verify it is responding:
+
+```powershell
+docker info
 ```
 
-#### Interactive Deploy Wizard Output:
+### The environment is still deploying
 
-```text
-============================================================
-   EBReady - Interactive AWS Elastic Beanstalk Deployer
-   Deploy any containerized web app to AWS in minutes
-============================================================
+Check the environment and its recent events:
 
---- Step 1: Select AWS Region ---
-  1) us-east-1       - US East (N. Virginia)
-  2) us-east-2       - US East (Ohio) (current)
-  ...
-Select region [2]:
-
---- Step 2: Application Details ---
-Elastic Beanstalk Application name [notes-app]:
-Elastic Beanstalk Environment name [notes-app-cluster]:
-
---- Step 3: Container Image Source ---
-  1) Build image from Dockerfile in project directory and push to ECR (Recommended)
-  2) Use existing local Docker image and push to ECR
-  3) Use already-pushed ECR/DockerHub image tag (skip build & push)
-Select option [1]:
-
---- Step 4: Review & Deploy ---
-  Project Directory : C:\Users\user\my-web-app
-  AWS Region        : us-east-2
-  AWS Account       : 123456789012
-  EB Application    : notes-app
-  EB Environment    : notes-app-cluster
-  ECR Repository    : notes-app
-  Image Tag         : 123456789012.dkr.ecr.us-east-2.amazonaws.com/notes-app:v1234567890
-  Cluster Mode      : EKS ✅
-  Build Dockerfile  : Yes
-  Push to ECR       : Yes
-
-Proceed with deployment? [Y/n]: y
-
-[+] Building Docker image (linux/amd64)...
-[+] Pushing image to ECR...
-[+] Creating IAM roles for Cluster Mode...
-    ✓ aws-elasticbeanstalk-eks-cluster-role
-    ✓ aws-elasticbeanstalk-eks-node-role
-    ✓ aws-elasticbeanstalk-eks-observability-role
-[+] Creating Cluster Mode environment 'notes-app-cluster'...
-[+] Waiting for environment to reach Ready state...
-    Status: Launching | Health: Grey
-    Status: Ready     | Health: Green ✅
-
-============================================================
-   ✅ Deployment complete for 'notes-app'!
-   Live URL: http://notes-app-cluster.eba-fmi7pmgg.us-east-2.elasticbeanstalk.com
-============================================================
+```powershell
+aws elasticbeanstalk describe-environments --application-name my-app --environment-names my-app-cluster --region us-east-2 --query "Environments[0].{Status:Status,Health:Health,Version:VersionLabel,CNAME:CNAME}" --output table --no-cli-pager
+aws elasticbeanstalk describe-events --environment-name my-app-cluster --region us-east-2 --max-records 15 --query "Events[*].[EventDate,Severity,Message]" --output table --no-cli-pager
 ```
 
-#### What `ebkit deploy` Automatically Handles:
-1. **Source Ingestion**: Local directory or GitHub URL safe clone via [`safe_clone_repo`](file:///ebkit/repo_handler.py).
-2. **Architecture Detection**: Detects single-tier and multi-tier topologies (frontend, backend, db, cache, worker).
-3. **Docker Build & ECR Push**: Builds `linux/amd64` image, creates ECR repo if needed, authenticates and pushes.
-4. **Zero-Infra IAM Setup**: Auto-creates `aws-elasticbeanstalk-eks-cluster-role`, `aws-elasticbeanstalk-eks-node-role`, `aws-elasticbeanstalk-eks-observability-role`.
-5. **Cluster Mode Environment**: Launches or updates EB environment with `Tier: Cluster (EKS)`.
-6. **Environment Variables**: Reads `.env`, `--env-file`, `--env KEY=VAL`, interactively prompts for missing variables.
-7. **Health Polling**: Polls until `Green/Ready` and prints the live URL.
+Replace the application, environment, and region with yours. A deployment is complete when the environment reports `Ready` and a healthy status.
 
-### Deploy CLI Options Reference
+### AWS CLI does not recognize `--image-configuration`
 
-| Option | Description | Default |
-|---|---|---|
-| `[SOURCE]` | Local path or GitHub repository URL | `.` (current directory) |
-| `--app` | Elastic Beanstalk Application name | Directory name |
-| `--env` | Elastic Beanstalk Environment name | `<app>-cluster` |
-| `--region` | AWS Region (e.g. `us-east-2`) | Configured region or `us-east-2` |
-| `--tag` | Docker image tag / ECR URI | Auto-generated timestamp tag |
-| `--repo` | ECR repository name | Matches application name |
-| `--port` | Application container port | Auto-detected from Dockerfile / 8080 |
-| `--env-file` | Path to `.env` file | `None` |
-| `--env` | Set env var (`KEY=VALUE`, repeatable) | `None` |
-| `--no-build` | Skip Docker build | `False` |
-| `--no-push` | Skip pushing image to ECR | `False` |
-| `--wait / --no-wait` | Wait for Ready state and print URL | `True` |
-| `-y, --yes` | CI/CD mode — skip interactive prompts | `False` |
+EBKit uses the AWS CLI to register Cluster image versions when the installed Boto3 version does not support that API shape. Install or update to the current AWS CLI v2 using the [official installation guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), open a new terminal, and verify with `aws --version`.
 
----
-
-## Generated Files (Cluster Mode)
+## Generated files
 
 | File | Purpose |
-|------|---------| 
-| `Dockerfile` | Multi-language Docker build (Python/Node.js), platform-aware (`linux/amd64`), non-root user |
-| `.dockerignore` | Excludes `.git`, `.env*`, `__pycache__`, local venvs, node_modules; preserves app source |
-| `Procfile` | Elastic Beanstalk web process definition |
-| `.ebignore` | Excludes dev files, secrets, and CI artefacts from EB bundles; preserves build files |
-| `.env.example` | Documents required env var KEYS only — never contains values or secrets |
+|---|---|
+| `Dockerfile` | Builds the application container |
+| `.dockerignore` | Excludes files from Docker build context |
+| `Procfile` | Defines the Elastic Beanstalk web process |
+| `.ebignore` | Excludes development files from deployment bundles |
+| `.env.example` | Lists environment-variable names without secret values |
 
-> **Note on `.ebextensions`:** Because EB Cluster Mode runs on Amazon EKS, `.ebextensions` are ignored and not generated. Environment variables are injected via `aws:elasticbeanstalk:eks:environment` OptionSettings.
+## For contributors
 
----
+Clone the repository, install development dependencies, and run the tests:
 
-## AI Providers
-
-| Provider | Status | Notes |
-|----------|--------|-------|
-| `Gemini` | ✅ Available (Default) | Uses `gemini-2.5-flash` (`GEMINI_API_KEY` or `GOOGLE_API_KEY`) |
-| `OpenAI` | 🔜 Coming Later | Architecture ready for OpenAI integration |
-| `Claude` | 🔜 Coming Later | Architecture ready for Anthropic Claude integration |
-| `Groq API` | 🔜 Coming Later | Architecture ready for Groq ultra-fast LPU inference |
-
-Only Gemini is active for deployment generation. Selecting upcoming providers displays `Coming Later`. Silent fallbacks are prohibited.
-
----
-
-## Safety Behaviour
-
-- **Existing files protected** — `Dockerfile`, `.dockerignore`, `Procfile`, `.ebignore`, `.env.example`, `.env` are never silently overwritten.
-- **Secrets never exposed** — `.env` files are detected but never read. Only key names appear in `.env.example`.
-- **API keys never stored** — `~/.ebkit/config` strictly forbids saving API keys, tokens, or credentials.
-- **AWS credentials never requested** — EBReady uses standard AWS credential chain (aws configure, IAM roles, env vars).
-- **Safe remote repository execution** — GitHub URLs are strictly validated; cloned repos are analyzed without executing repository code.
-- **No shell injection** — `start_command` is validated to reject `$()`, backticks, `&&`, `||`, pipes, and semicolons.
-- **Pydantic validation** — every AI response is parsed and validated before reaching the template renderer.
-- **Cluster Mode Preflight** — evaluates architecture, port, health check, container security before declaring `READY FOR DEPLOYMENT`.
-
----
-
-## Docker AI (Gordon) Self-Healing Recovery Loop
-
-When Docker Build, Container Runtime Health Check, or Docker Scout security scan fails, EBReady leverages the installed **Docker AI (Gordon)** agent to diagnose and repair automatically:
-
-```text
-Failure (Build error / Runtime crash / Scout Critical CVEs)
-       │
-       ▼
- 🤖 Gordon Diagnoses Problem
-       │
-       ▼
- 📄 Corrected Dockerfile Generated (Source code untouched)
-       │
-       ▼
- 🛡 EBReady Safety & Cross-File Validation
-       │
-       ▼
- 🔄 Rebuild & Retest (Limited to 2–3 attempts)
+```powershell
+git clone https://github.com/Rakesh-Patra/ebready.git
+cd ebready
+py -m pip install -e ".[dev]"
+py -m pytest
 ```
 
-**Guardrails & Safety Guarantees:**
-1. **Source Code Untouched:** Docker AI only generates and modifies `Dockerfile`.
-2. **Pre-Rebuild Safety Validation:** All repaired Dockerfiles pass `CrossFileValidator` before executing `docker build`.
-3. **Secret Protection:** `.env` and sensitive environment variable values are never passed to Gordon.
-4. **Scout Security Gate:** Critical vulnerabilities must be 0. If base images contain critical CVEs, Gordon updates to hardened minimal images.
-5. **Clear Availability Reporting:** If Docker AI (Gordon) is unavailable, EBReady explicitly reports `⚠️ Docker AI (Gordon) is unavailable`.
-6. **Bounded Attempts:** Repairs are strictly capped at 2–3 attempts (configured via `--max-repair-attempts`).
+On macOS/Linux, use `python3` in place of `py`.
 
----
+## Current limitations
 
-## Running Tests
-
-```bash
-pytest tests/ -v
-```
-
----
-
-## Project Structure
-
-```text
-ebready/
-├── ebkit/
-│   ├── __main__.py             # Direct execution (python -m ebkit)
-│   ├── cli.py                  # CLI entry point (ebkit command)
-│   ├── config.py               # Non-secret config management (~/.ebkit/config)
-│   ├── repo_handler.py         # Safe GitHub URL validation & repository cloner
-│   ├── analyzer/
-│   │   ├── scanner.py          # Heuristic repository scanner
-│   │   ├── ai_analyzer.py      # AI abstraction + Gemini (Active), OpenAI/Claude/Groq (Stubs)
-│   │   ├── cleaner.py          # Output / artifact cleaner
-│   │   └── diagnosis.py        # Deployment diagnosis utilities
-│   ├── models/
-│   │   ├── artifact_plan.py    # Strict controlled ArtifactPlan
-│   │   └── deployment_config.py # Strict Pydantic schema + Cluster configs
-│   ├── generator/
-│   │   ├── artifact_planner.py # Artifact requirement planner
-│   │   ├── renderer.py         # Jinja2 template renderer
-│   │   └── templates/
-│   │       ├── Dockerfile.j2
-│   │       ├── dockerignore.j2
-│   │       ├── Procfile.j2
-│   │       ├── ebignore.j2
-│   │       └── env.example.j2
-│   ├── validator/
-│   │   ├── cross_validator.py  # Cross-artifact consistency & secret scanning
-│   │   ├── docker_validator.py # Docker build, runtime probe & Scout gate
-│   │   ├── health_checker.py   # Framework-agnostic HTTP health checker
-│   │   └── cluster_preflight.py # Cluster Mode preflight validation
-│   └── commands/
-│       ├── init.py             # ebkit init interactive setup wizard & pipeline
-│       └── deploy.py           # ebkit deploy — ECR + EB Cluster Mode deployer
-├── tests/
-│   ├── test_ebkit.py           # Core scanner, models, renderer tests
-│   ├── test_day2_artifacts.py  # Complete Day 2 artifact test matrix
-│   ├── test_interactive_cli.py # Interactive CLI UX, config & security tests
-│   └── test_framework_agnostic_health_check.py
-├── app/                        # EBReady FastAPI hello-world app
-│   └── main.py
-├── requirements.txt
-└── pyproject.toml
-```
-
----
-
-## Roadmap
-
-- GitHub Actions workflow generator (`ebkit ci`)
-- Multi-container / Docker Compose support (`ebkit deploy --compose`)
-- Automated rollback on failed health checks
-- OpenAI, Claude, Groq AI provider support
+- Gemini is the only active AI provider for `ebkit init`.
+- The deploy workflow targets a single Docker image in Elastic Beanstalk Cluster Mode.
+- Multi-container/Docker Compose deployment and automated rollback are not currently supported.
