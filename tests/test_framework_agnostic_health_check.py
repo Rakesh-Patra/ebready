@@ -203,16 +203,18 @@ services:
 
         with patch("shutil.which", return_value="/usr/bin/docker"):
             with patch.object(DockerRuntimeValidator, "find_free_host_port", return_value=49152):
-                with patch("subprocess.run") as mock_run:
-                    mock_run.return_value = MagicMock(returncode=0, stdout="cid\n", stderr="")
+                with patch.object(DockerRuntimeValidator, "is_container_running", return_value=True):
+                    with patch.object(DockerRuntimeValidator, "verify_port_mapping", return_value=True):
+                        with patch("subprocess.run") as mock_run:
+                            mock_run.return_value = MagicMock(returncode=0, stdout="cid\n", stderr="")
 
-                    mock_resp = MagicMock()
-                    mock_resp.status = 200
-                    mock_resp.__enter__ = lambda s: s
-                    mock_resp.__exit__ = MagicMock(return_value=False)
+                            mock_resp = MagicMock()
+                            mock_resp.status = 200
+                            mock_resp.__enter__ = lambda s: s
+                            mock_resp.__exit__ = MagicMock(return_value=False)
 
-                    with patch("urllib.request.urlopen", return_value=mock_resp):
-                        result = validator.validate("custom-app:prod", port=2023)
+                            with patch("urllib.request.urlopen", return_value=mock_resp):
+                                result = validator.validate("custom-app:prod", port=2023)
 
         assert result.host_port == 49152
         assert result.container_port == 2023

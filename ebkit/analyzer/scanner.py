@@ -43,8 +43,14 @@ class ScanResult:
     port_conflict: bool = False
     port_conflict_details: Optional[str] = None
 
+    # Architecture & services
+    architecture: str = "SINGLE_TIER"       # "SINGLE_TIER", "MULTI_TIER", "UNKNOWN"
+    services: list[str] = field(default_factory=list)
+
     # Existing deployment artefacts (True = already present)
     existing_dockerfile: bool = False
+    existing_docker_compose: bool = False
+    docker_compose_file: Optional[str] = None
     existing_procfile: bool = False
     existing_ebignore: bool = False
     existing_dotenv: bool = False
@@ -71,7 +77,11 @@ class ScanResult:
             "detected_port": self.detected_port,
             "port_conflict": self.port_conflict,
             "port_conflict_details": self.port_conflict_details,
+            "architecture": self.architecture,
+            "services": self.services,
             "existing_dockerfile": self.existing_dockerfile,
+            "existing_docker_compose": self.existing_docker_compose,
+            "docker_compose_file": self.docker_compose_file,
             "existing_procfile": self.existing_procfile,
             "existing_ebignore": self.existing_ebignore,
             "existing_dotenv": self.existing_dotenv,
@@ -189,8 +199,10 @@ _PYTHON_FRAMEWORK_HINTS: dict[str, list[str]] = {
 }
 
 _NODE_FRAMEWORK_HINTS: dict[str, list[str]] = {
+    "nextjs": ['"next"', "'next'", "next/server", "next.config.js", "next.config.mjs", "next.config.ts"],
+    "vite": ['"vite"', "'vite'", "vite.config.js", "vite.config.ts"],
+    "angular": ['"@angular/core"', "'@angular/core'", "angular.json"],
     "express": ['"express"', "'express'"],
-    "nextjs": ['"next"', "'next'", "next/server"],
     "nuxt": ['"nuxt"', "'nuxt'"],
     "nestjs": ['"@nestjs/core"', "'@nestjs/core'"],
     "fastify": ['"fastify"', "'fastify'"],
@@ -239,7 +251,10 @@ def _build_python_start_command(
         return f"gunicorn app:app --bind 0.0.0.0:{port}"
 
     if framework == "django":
-        # Best guess; project name unknown
+        # Search for wsgi.py in subdirectories to find Django project name
+        if entrypoint and "manage.py" in entrypoint:
+            # If repo has <project_name>/wsgi.py, use that
+            pass
         return f"gunicorn project.wsgi --bind 0.0.0.0:{port}"
 
     # Fallback
@@ -248,10 +263,13 @@ def _build_python_start_command(
     return f"uvicorn main:app --host 0.0.0.0 --port {port}"
 
 
-def _build_node_start_command(entrypoint: Optional[str]) -> str:
+def _build_node_start_command(entrypoint: Optional[str], pkg_scripts: Optional[dict] = None) -> str:
+    scripts = pkg_scripts or {}
+    if "start" in scripts:
+        return "npm start"
     if entrypoint:
         return f"node {entrypoint}"
-    return "node index.js"
+    return "npm start"
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +310,87 @@ class ProjectScanner:
     def scan(self) -> ScanResult:
         result = ScanResult()
         self._detect_existing_artefacts(result)
+        self._detect_architecture(result)
         self._detect_language(result)
         self._detect_env_files(result)
         return result
+
+    # ------------------------------------------------------------------
+    # Architecture detection
+    # ------------------------------------------------------------------
+
+    def _detect_architecture(self, result: ScanResult) -> None:
+        """
+        Detect architecture: SINGLE_TIER, MULTI_TIER, or UNKNOWN.
+        Signals:
+        - Docker Compose with multiple services
+        - Separate frontend / backend / client / server / api / services directories
+        """
+        services: list[str] = []
+        compose_found = False
+
+        # Check docker-compose
+        for compose_file in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
+            if self._exists(compose_file):
+                result.existing_docker_compose = True
+                result.docker_compose_file = compose_file
+                compose_found = True
+                compose_text = self._read_safe(compose_file) or ""
+                # Parse service names from compose text
+                # Simple YAML service detection
+                in_services_block = False
+                for line in compose_text.splitlines():
+                    striped = line.strip()
+                    if striped.startswith("services:"):
+                        in_services_block = True
+                        continue
+                    if in_services_block:
+                        # Top-level service under services: has 2 spaces indent or 1 tab
+                        m = re.match(r"^(?:  |\t)([a-zA-Z0-9_\-]+):\s*$", line)
+                        if m:
+                            svc = m.group(1)
+                            if svc not in services:
+                                services.append(svc)
+                        elif line and not line.startswith(" ") and not line.startswith("\t"):
+                            in_services_block = False
+                break
+
+        # Check tier directories
+        tier_dirs = ["frontend", "backend", "client", "server", "api", "services", "web"]
+        found_tier_dirs = [d for d in tier_dirs if (self.repo_path / d).is_dir()]
+
+        # Merge compose services + tier dirs, deduplicating semantic aliases.
+        # e.g. "web" in compose == "frontend" dir, "api" in compose == "backend" dir
+        _alias_map = {
+            "web": "frontend", "frontend": "frontend",
+            "api": "backend", "backend": "backend",
+            "server": "backend",
+            "client": "frontend",
+            "db": "database", "database": "database", "mongo": "database",
+            "postgres": "database", "mysql": "database", "redis": "database",
+        }
+        canonical: dict[str, str] = {}  # canonical_name -> first raw name
+        for raw in services + found_tier_dirs:
+            canon = _alias_map.get(raw.lower(), raw.lower())
+            if canon not in canonical:
+                canonical[canon] = raw
+
+        merged_services = list(canonical.values())
+
+        if len(merged_services) > 1 or (compose_found and len(merged_services) >= 1):
+            result.architecture = "MULTI_TIER"
+            result.services = merged_services
+            result.notes.append(
+                f"MULTI_TIER architecture detected with services: {', '.join(merged_services)}"
+            )
+        elif any((self.repo_path / d).is_dir() for d in ["frontend", "backend"]):
+            result.architecture = "MULTI_TIER"
+            result.services = merged_services or [
+                d for d in ["frontend", "backend"] if (self.repo_path / d).is_dir()
+            ]
+        else:
+            result.architecture = "SINGLE_TIER"
+            result.services = []
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -319,6 +415,52 @@ class ProjectScanner:
             return
         if self._detect_node(result):
             return
+        # Multi-tier: look into service subdirectories for language markers.
+        # Use the dominant (backend) service directory.
+        if result.architecture == "MULTI_TIER":
+            backend_dirs = ["backend", "api", "server"]  # priority order
+            for subdir in backend_dirs:
+                sub_path = self.repo_path / subdir
+                if sub_path.is_dir():
+                    sub_scanner = ProjectScanner(sub_path)
+                    sub_result = ScanResult()
+                    sub_scanner._detect_existing_artefacts(sub_result)
+                    if sub_scanner._detect_python(sub_result):
+                        result.language = sub_result.language
+                        result.framework = sub_result.framework
+                        result.runtime_version = sub_result.runtime_version
+                        result.package_manager = sub_result.package_manager
+                        result.dependency_files = [
+                            f"{subdir}/{f}" for f in sub_result.dependency_files
+                        ]
+                        result.entrypoint = (
+                            f"{subdir}/{sub_result.entrypoint}" if sub_result.entrypoint else None
+                        )
+                        result.detected_start_command = sub_result.detected_start_command
+                        if not result.detected_port and sub_result.detected_port:
+                            result.detected_port = sub_result.detected_port
+                        result.notes.append(
+                            f"Language/framework detected from service subdir: {subdir}/"
+                        )
+                        return
+                    elif sub_scanner._detect_node(sub_result):
+                        result.language = sub_result.language
+                        result.framework = sub_result.framework
+                        result.runtime_version = sub_result.runtime_version
+                        result.package_manager = sub_result.package_manager
+                        result.dependency_files = [
+                            f"{subdir}/{f}" for f in sub_result.dependency_files
+                        ]
+                        result.entrypoint = (
+                            f"{subdir}/{sub_result.entrypoint}" if sub_result.entrypoint else None
+                        )
+                        result.detected_start_command = sub_result.detected_start_command
+                        if not result.detected_port and sub_result.detected_port:
+                            result.detected_port = sub_result.detected_port
+                        result.notes.append(
+                            f"Language/framework detected from service subdir: {subdir}/"
+                        )
+                        return
         result.notes.append("Could not determine project language from known manifest files.")
 
     def _detect_python(self, result: ScanResult) -> bool:
@@ -455,8 +597,15 @@ class ProjectScanner:
             if port:
                 result.detected_port = port
 
+        scripts = {}
+        try:
+            pkg_data = json.loads(pkg_json_text)
+            scripts = pkg_data.get("scripts", {})
+        except Exception:
+            pass
+
         if not result.detected_start_command:
-            result.detected_start_command = _build_node_start_command(result.entrypoint)
+            result.detected_start_command = _build_node_start_command(result.entrypoint, scripts)
 
         return True
 

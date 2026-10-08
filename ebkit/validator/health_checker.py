@@ -75,8 +75,11 @@ class GenericHTTPHealthChecker:
             headers={"User-Agent": "EBReady-HealthChecker/1.0", "Accept": "*/*"},
         )
 
+        import ssl
+        ctx = ssl._create_unverified_context()
+
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout_seconds, context=ctx) as resp:
                 elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
                 code = getattr(resp, "status", 200)
                 if 200 <= code <= 399:

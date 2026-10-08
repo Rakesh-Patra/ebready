@@ -182,38 +182,59 @@ class GoogleAIAnalyzer(AIAnalyzer):
             self._genai_model = None
 
     def analyze(self, scan_result: ScanResult) -> DeploymentConfig:
+        import time
+        import urllib.error
+        import urllib.request
+
         logger.info("[GoogleAIAnalyzer] Calling Gemini")
         user_content = _USER_PROMPT_TEMPLATE.format(
             scan_json=json.dumps(scan_result.as_dict(), indent=2)
         )
 
-        if self._genai_model is not None:
-            response = self._genai_model.generate_content(user_content)
-            raw = response.text or ""
-            return self._parse_response(raw)
+        models_to_try = [self.model]
+        models_to_try = [self.model, "gemini-flash-latest", "gemini-2.5-flash-lite", "gemini-pro-latest"]
+        seen = set()
+        models_to_try = [m for m in models_to_try if not (m in seen or seen.add(m))]
 
-        # Built-in REST client fallback
-        import urllib.request
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-        payload = {
-            "system_instruction": {"parts": [{"text": _SYSTEM_PROMPT}]},
-            "contents": [{"parts": [{"text": user_content}]}],
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 8192,
-                "responseMimeType": "application/json",
-            },
-        }
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-            raw = body["candidates"][0]["content"]["parts"][0]["text"]
-            return self._parse_response(raw)
+        last_error = None
+        for try_model in models_to_try:
+            for attempt in range(2):
+                try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{try_model}:generateContent?key={self.api_key}"
+                    payload = {
+                        "system_instruction": {"parts": [{"text": _SYSTEM_PROMPT}]},
+                        "contents": [{"parts": [{"text": user_content}]}],
+                        "generationConfig": {
+                            "temperature": 0.1,
+                            "maxOutputTokens": 8192,
+                            "responseMimeType": "application/json",
+                        },
+                    }
+                    data = json.dumps(payload).encode("utf-8")
+                    req = urllib.request.Request(
+                        url,
+                        data=data,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        body = json.loads(resp.read().decode("utf-8"))
+                        raw = body["candidates"][0]["content"]["parts"][0]["text"]
+                        return self._parse_response(raw)
+                except urllib.error.HTTPError as exc:
+                    last_error = exc
+                    if exc.code in (429, 503, 500):
+                        time.sleep(2 ** attempt)
+                        continue
+                    # On 404 or other error, break out of attempt loop to try next model
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    time.sleep(1)
+                    continue
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("Failed to generate content from Gemini after retries")
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ Usage:
 """
 
 import sys
+# pyrefly: ignore [missing-import]
 import click
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -15,6 +16,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from ebkit.commands.init import init_command
+from ebkit.commands.deploy import deploy_command
 
 
 @click.group()
@@ -26,6 +28,7 @@ def cli() -> None:
 
 
 cli.add_command(init_command, name="init")
+cli.add_command(deploy_command, name="deploy")
 
 
 def main() -> None:

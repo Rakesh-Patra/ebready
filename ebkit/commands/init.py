@@ -30,6 +30,7 @@ if hasattr(sys.stderr, "reconfigure"):
 from pathlib import Path
 from typing import Optional
 
+# pyrefly: ignore [missing-import]
 import click
 
 from ebkit.analyzer.ai_analyzer import get_analyzer
@@ -483,6 +484,19 @@ def init_command(
     if scan.detected_port:
         click.echo(f"✓ Port {scan.detected_port} detected")
         shown_details += 1
+    if scan.architecture:
+        click.echo(f"✓ Architecture: {scan.architecture}")
+        if scan.architecture == "MULTI_TIER" and scan.services:
+            click.echo("  Services:")
+            for s in scan.services:
+                click.echo(f"  ✓ {s}")
+        shown_details += 1
+    if scan.existing_dockerfile:
+        click.echo("✓ Dockerfile detected")
+        shown_details += 1
+    elif scan.existing_docker_compose:
+        click.echo("✓ Docker Compose detected")
+        shown_details += 1
     if shown_details == 0:
         click.echo("✓ Project detected")
 
@@ -501,14 +515,10 @@ def init_command(
     resolved_port: Optional[int] = port or scan.detected_port
     if resolved_port is None:
         if yes:
-            click.echo(
-                "\n❌ Application port could not be determined from project metadata.\n\n"
-                "Specify the port explicitly using --port <port>.",
-                err=True,
-            )
-            if tmp_clone_dir:
-                shutil.rmtree(tmp_clone_dir, ignore_errors=True)
-            sys.exit(1)
+            # In non-interactive mode, fall back to 8080 — the AI analysis will
+            # confirm or override this with the correct port.
+            resolved_port = 8080
+            click.echo("⚠️ Application port could not be auto-detected — defaulting to 8080.")
         else:
             click.echo("\n⚠️ Application port could not be determined from project metadata.")
             resolved_port = click.prompt("Please enter application port", type=int)
@@ -589,7 +599,7 @@ def init_command(
     skipped: dict[str, str] = dict(kit.skipped)
 
     for rel_path, content in kit.files.items():
-        ok, status = _safe_write(dest_path, rel_path, content, force=force)
+        ok, status = _safe_write(dest_path, rel_path, content, force=(force or yes))
         if ok:
             written[rel_path] = status
             click.echo(f"✓ {rel_path}")
@@ -598,6 +608,18 @@ def init_command(
 
     for rel_path in kit.skipped:
         click.echo(f"✓ {rel_path} (if required)")
+
+    # If output dest_path is separate from repo_path, populate dest_path with source files
+    if dest_path.resolve() != repo_path.resolve():
+        for item in repo_path.iterdir():
+            if item.name.startswith(".git"):
+                continue
+            dest_item = dest_path / item.name
+            if item.is_dir():
+                if not dest_item.exists():
+                    shutil.copytree(item, dest_item, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, dest_item)
 
     # Also write to repo_path if dest_path is separate, so Docker build can find files
     if dest_path.resolve() != repo_path.resolve():

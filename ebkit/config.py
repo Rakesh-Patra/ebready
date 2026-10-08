@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 # Keys that are strictly allowed to be saved in non-secret config
 ALLOWED_CONFIG_KEYS = {
     "ai_provider",
+    "aws_region",
+    "aws_application",
+    "aws_environment",
 }
 
 # Forbidden substrings/patterns in keys (defense-in-depth against secrets)
@@ -46,10 +49,16 @@ class EBKitConfig:
     """Non-secret configuration model for EBKit."""
 
     ai_provider: str = "gemini"
+    aws_region: str = "us-east-2"
+    aws_application: str = "ebready"
+    aws_environment: str = "ebready-dev"
 
     def as_dict(self) -> dict[str, str]:
         return {
             "ai_provider": self.ai_provider,
+            "aws_region": self.aws_region,
+            "aws_application": self.aws_application,
+            "aws_environment": self.aws_environment,
         }
 
     @property
@@ -101,9 +110,15 @@ def load_config(config_path: Optional[Path] = None) -> Optional[EBKitConfig]:
             data = dict(parser.items(section))
 
         ai_provider = data.get("ai_provider", "gemini")
+        aws_region = data.get("aws_region", "us-east-2")
+        aws_application = data.get("aws_application", "ebready")
+        aws_environment = data.get("aws_environment", "ebready-dev")
 
         return EBKitConfig(
             ai_provider=ai_provider,
+            aws_region=aws_region,
+            aws_application=aws_application,
+            aws_environment=aws_environment,
         )
     except Exception as exc:
         logger.debug("Failed to read config from %s: %exc", path, exc)
