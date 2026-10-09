@@ -1,1 +1,0 @@
-"""EBReady FastAPI Application package."""

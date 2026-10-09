@@ -15,10 +15,21 @@ htmlcov/
 .idea/
 .vscode/
 
-# Example apps (not part of ebkit library)
-fastapi-example/
-notes-app/
-
 # AWS / EB artifacts
 .elasticbeanstalk/
 *.zip
+
+# InsForge & AI agent skills
+.insforge
+.agent
+.agents
+.augment
+.claude
+.cline
+.github/copilot*
+.kilocode
+.qoder
+.qwen
+.roo
+.trae
+.windsurf
