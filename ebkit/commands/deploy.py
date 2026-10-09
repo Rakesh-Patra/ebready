@@ -968,7 +968,8 @@ def _poll_environment_health(eb_client, app_name: str, env_name: str, timeout: i
     _info(f"Polling deployment status for '{env_name}'...")
     start = time.time()
     cname = None
-    last_status = None
+    last_state = None
+    last_health = "Unknown"
     while True:
         try:
             envs = eb_client.describe_environments(
@@ -979,11 +980,16 @@ def _poll_environment_health(eb_client, app_name: str, env_name: str, timeout: i
                 status = env.get("Status", "Unknown")
                 health = env.get("Health", "Unknown")
                 cname = env.get("CNAME")
-                if status != last_status:
+                if (status, health) != last_state:
                     click.echo(f"    Current State: Status={status} | Health={health}")
-                    last_status = status
-                if status == "Ready":
-                    return {"status": status, "health": health, "url": f"http://{cname}" if cname else None}
+                    last_state = (status, health)
+                last_health = health
+                if status == "Ready" and str(health).lower() != "grey":
+                    return {
+                        "status": status,
+                        "health": health,
+                        "url": f"http://{cname}" if cname else None,
+                    }
                 if status in ("Terminated", "Terminating"):
                     return {"status": status, "health": health, "url": None}
         except Exception as exc:
@@ -991,7 +997,11 @@ def _poll_environment_health(eb_client, app_name: str, env_name: str, timeout: i
 
         if time.time() - start > timeout:
             _warn("Reached status check timeout.")
-            return {"status": "Timeout", "health": "Unknown", "url": f"http://{cname}" if cname else None}
+            return {
+                "status": "Timeout",
+                "health": last_health,
+                "url": f"http://{cname}" if cname else None,
+            }
         time.sleep(15)
 
 
