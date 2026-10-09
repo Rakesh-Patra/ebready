@@ -13,15 +13,19 @@ Features:
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 import boto3
 import click
+import yaml
 from botocore.exceptions import ClientError, NoCredentialsError, ParamValidationError
 
 from ebkit.config import load_config
@@ -68,6 +72,34 @@ _TIER_HINTS = {
     "worker": ["worker", "celery", "rq", "queue", "sidekiq", "beat"],
     "cache": ["cache", "redis", "memcached"],
 }
+
+_STATEFUL_IMAGES = {
+    "postgres": ("database", "PostgreSQL"),
+    "postgresql": ("database", "PostgreSQL"),
+    "mysql": ("database", "MySQL"),
+    "mariadb": ("database", "MariaDB"),
+    "mongo": ("database", "MongoDB"),
+    "mongodb": ("database", "MongoDB"),
+    "redis": ("cache", "Redis"),
+    "valkey": ("cache", "Redis-compatible"),
+    "memcached": ("cache", "Memcached"),
+}
+
+_DATABASE_ENV_KEY = re.compile(
+    r"(DATABASE|DB_|_DB$|POSTGRES|MYSQL|MONGO|REDIS|CACHE|SQL|_URI$|_URL$|_DSN$|CONNECTION)",
+    re.IGNORECASE,
+)
+_ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def _is_secret_environment_variable(name: str) -> bool:
+    return bool(
+        re.search(
+            r"(PASS|PWD|SECRET|TOKEN|KEY|URI|URL|DSN|CONNECTION|CREDENTIAL)",
+            name,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _banner() -> None:
@@ -208,6 +240,413 @@ def _detect_architecture(proj_dir: Path) -> Dict:
     return {"tier": tier, "services": service_roles}
 
 
+def _load_compose_web_services(project_dir: Path) -> Tuple[List[Dict], Tuple[str, ...]]:
+    compose_files = [
+        project_dir / name
+        for name in (
+            "compose.yaml",
+            "compose.yml",
+            "docker-compose.yaml",
+            "docker-compose.yml",
+        )
+        if (project_dir / name).is_file()
+    ]
+    if not compose_files:
+        raise click.ClickException(
+            "--compose requires a compose.yaml, compose.yml, docker-compose.yaml, "
+            "or docker-compose.yml file in the project root."
+        )
+
+    compose_path = compose_files[0]
+    try:
+        compose = yaml.safe_load(compose_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise click.ClickException(f"Could not read Compose file '{compose_path}': {exc}") from exc
+
+    services = compose.get("services")
+    if not isinstance(services, dict) or not services:
+        raise click.ClickException(f"Compose file '{compose_path}' must define services.")
+
+    parsed_services: Dict[str, Dict] = {}
+    unsupported = []
+    for name, config in services.items():
+        if not isinstance(config, dict):
+            raise click.ClickException(f"Compose service '{name}' must be a mapping.")
+        service_name = str(name)
+        role = next(
+            (
+                role_name
+                for role_name, hints in _TIER_HINTS.items()
+                if any(hint in service_name.lower() for hint in hints)
+            ),
+            "backend",
+        )
+        image = str(config.get("image", "")).lower()
+        image_name = image.rsplit("/", 1)[-1].split("@", 1)[0].split(":", 1)[0]
+        stateful = _STATEFUL_IMAGES.get(image_name)
+        if stateful:
+            role = stateful[0]
+        build = config.get("build")
+        if not build:
+            if role in ("database", "cache"):
+                parsed_services[service_name] = {
+                    "name": service_name,
+                    "config": config,
+                    "external": True,
+                    "role": role,
+                    "database_type": stateful[1] if stateful else None,
+                }
+            else:
+                unsupported.append(service_name)
+            continue
+        if isinstance(build, str):
+            context = (compose_path.parent / build).resolve()
+            dockerfile = context / "Dockerfile"
+        elif isinstance(build, dict):
+            if "dockerfile_inline" in build:
+                raise click.ClickException(
+                    f"Compose service '{service_name}' uses dockerfile_inline, which EBKit "
+                    "cannot stage. Add a Dockerfile to the build context instead."
+                )
+            context = (compose_path.parent / str(build.get("context", "."))).resolve()
+            dockerfile = (context / str(build.get("dockerfile", "Dockerfile"))).resolve()
+        else:
+            raise click.ClickException(f"Compose service '{name}' has an invalid build setting.")
+        if not context.is_dir() or not dockerfile.is_file():
+            raise click.ClickException(
+                f"Compose service '{name}' must build from a directory containing a Dockerfile: "
+                f"{context}"
+            )
+        if role in ("database", "cache", "worker"):
+            raise click.ClickException(
+                f"Compose service '{service_name}' is classified as a {role}. EB Cluster "
+                "deploys HTTP services; use a managed database/cache or a worker platform "
+                "designed for background jobs."
+            )
+        try:
+            dockerfile.relative_to(context)
+        except ValueError as exc:
+            raise click.ClickException(
+                f"Compose service '{name}' Dockerfile must be inside its build context."
+            ) from exc
+        if config.get("volumes"):
+            raise click.ClickException(
+                f"Compose service '{service_name}' mounts volumes. EB Cluster deployment does "
+                "not translate container mounts; move persistent data to a managed service or "
+                "remove the mount."
+            )
+        if config.get("network_mode") or config.get("devices") or config.get("privileged"):
+            raise click.ClickException(
+                f"Compose service '{service_name}' uses host-level networking or privileges, "
+                "which cannot be represented in an EB Cluster service."
+            )
+        for port_mapping in config.get("ports", []):
+            protocol = (
+                port_mapping.get("protocol", "tcp")
+                if isinstance(port_mapping, dict)
+                else str(port_mapping).rsplit("/", 1)[-1]
+                if "/" in str(port_mapping)
+                else "tcp"
+            )
+            if protocol.lower() != "tcp":
+                raise click.ClickException(
+                    f"Compose service '{service_name}' publishes a non-TCP port. "
+                    "Elastic Beanstalk Cluster environments expose HTTP services, not UDP."
+                )
+        unsupported_options = (
+            "command",
+            "entrypoint",
+            "healthcheck",
+            "secrets",
+            "configs",
+            "deploy",
+            "pid",
+            "ipc",
+            "runtime",
+            "cap_add",
+            "cap_drop",
+            "security_opt",
+            "restart",
+            "links",
+            "extra_hosts",
+        )
+        present_unsupported = [key for key in unsupported_options if key in config]
+        if present_unsupported:
+            raise click.ClickException(
+                f"Compose service '{service_name}' uses options EBKit cannot translate to "
+                "Elastic Beanstalk Cluster Mode: " + ", ".join(present_unsupported)
+            )
+        parsed_services[service_name] = {
+            "name": service_name,
+            "config": config,
+            "context": context,
+            "role": role,
+            "database_type": None,
+            "dockerfile": dockerfile,
+            "build": build,
+            "external": False,
+        }
+
+    if unsupported:
+        raise click.ClickException(
+            "Compose deployment needs each deployable service to define a Docker build. "
+            "Services without a build must be external databases or caches. Unsupported "
+            "services: " + ", ".join(unsupported)
+        )
+
+    visiting = set()
+    visited = set()
+    ordered = []
+
+    def stateful_dependencies(service_name: str, seen=None):
+        seen = set() if seen is None else seen
+        if service_name in seen:
+            return []
+        seen.add(service_name)
+        result = []
+        dependencies = parsed_services[service_name]["config"].get("depends_on", [])
+        if isinstance(dependencies, dict):
+            dependencies = list(dependencies)
+        for dependency in dependencies or []:
+            depended_service = parsed_services[dependency]
+            if depended_service["external"]:
+                if depended_service["role"] in ("database", "cache"):
+                    result.append(depended_service)
+            else:
+                result.extend(stateful_dependencies(dependency, seen))
+        return result
+
+    def visit(service_name: str) -> None:
+        if service_name in visiting:
+            raise click.ClickException(f"Compose service dependency cycle detected at '{service_name}'.")
+        if service_name in visited:
+            return
+        visiting.add(service_name)
+        dependencies = parsed_services[service_name]["config"].get("depends_on", [])
+        if isinstance(dependencies, dict):
+            dependencies = list(dependencies)
+        for dependency in dependencies or []:
+            if dependency not in parsed_services:
+                raise click.ClickException(
+                    f"Compose service '{service_name}' depends on undefined service '{dependency}'."
+                )
+            visit(dependency)
+        visiting.remove(service_name)
+        visited.add(service_name)
+        if not parsed_services[service_name]["external"]:
+            parsed_services[service_name]["stateful_dependencies"] = stateful_dependencies(
+                service_name
+            )
+            ordered.append(parsed_services[service_name])
+
+    for service_name in parsed_services:
+        visit(service_name)
+    if not ordered:
+        raise click.ClickException("Compose file has no Docker-built HTTP services to deploy.")
+    return ordered, tuple(
+        name for name, service in parsed_services.items() if service["external"]
+    )
+
+
+def _detect_service_port(service: Dict) -> int:
+    for item in service["config"].get("expose", []):
+        value = item.get("target") if isinstance(item, dict) else str(item).split("/")[-1]
+        value = str(value)
+        if value.isdigit():
+            return int(value)
+    for item in service["config"].get("ports", []):
+        value = item.get("target") if isinstance(item, dict) else str(item).split(":")[-1].split("/")[0]
+        value = str(value)
+        if value.isdigit():
+            return int(value)
+    try:
+        for line in service["dockerfile"].read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.strip().upper().startswith("EXPOSE"):
+                port = line.split()[1].split("/")[0]
+                if port.isdigit():
+                    return int(port)
+    except (OSError, IndexError):
+        pass
+    raise click.ClickException(
+        f"Could not determine the listening port for service '{service['name']}'. "
+        "Set `expose` in Compose or add Dockerfile EXPOSE."
+    )
+
+
+def _service_resource_name(prefix: str, service_name: str, max_length: int) -> str:
+    prefix = re.sub(r"[^a-z0-9-]+", "-", prefix.lower()).strip("-") or "ebkit"
+    suffix = re.sub(r"[^a-z0-9-]+", "-", service_name.lower()).strip("-")
+    suffix = suffix[:max_length - 2]
+    prefix_length = max_length - len(suffix) - 1
+    return f"{prefix[:prefix_length].rstrip('-') or 'e'}-{suffix}"
+
+
+def _interpolate_compose_value(value: str, variables: Dict[str, str], service_name: str) -> str:
+    pattern = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+    def substitute(match: re.Match) -> str:
+        variable, default = match.groups()
+        if variable in variables:
+            return variables[variable]
+        if default is not None:
+            return default
+        raise click.ClickException(
+            f"Compose service '{service_name}' references unset variable '{variable}'. "
+            "Set it in .env, --env-file, or with --env KEY=VALUE."
+        )
+
+    return pattern.sub(substitute, value)
+
+
+def _resolve_service_endpoints(value: str, endpoints: Dict[str, str]) -> str:
+    for dependency, endpoint in endpoints.items():
+        host = urlsplit(endpoint).netloc
+        value = re.sub(
+            r"(?P<scheme>https?://)" + re.escape(dependency) + r"(?::\d+)?(?=[:/]|$)",
+            lambda match: match.group("scheme") + host,
+            value,
+        )
+    return value
+
+
+def _compose_service_environment(
+    service: Dict,
+    project_dir: Path,
+    interpolation: Dict[str, str],
+    overrides: Dict[str, str],
+    endpoints: Dict[str, str],
+    external_services: Tuple[str, ...],
+) -> Dict[str, str]:
+    config = service["config"]
+    environment: Dict[str, str] = {}
+    env_files = config.get("env_file", [])
+    if isinstance(env_files, str):
+        env_files = [env_files]
+    for env_file in env_files:
+        env_file_path = env_file.get("path") if isinstance(env_file, dict) else env_file
+        resolved_env_file = project_dir / str(env_file_path)
+        if not resolved_env_file.is_file():
+            raise click.ClickException(
+                f"Compose service '{service['name']}' env_file was not found: "
+                f"{resolved_env_file}"
+            )
+        environment.update(_load_env_file(str(resolved_env_file)))
+
+    compose_environment = config.get("environment", {})
+    if isinstance(compose_environment, list):
+        parsed_environment = {}
+        for entry in compose_environment:
+            key, separator, value = str(entry).partition("=")
+            parsed_environment[key] = value if separator else None
+        compose_environment = parsed_environment
+    if not isinstance(compose_environment, dict):
+        raise click.ClickException(
+            f"Compose service '{service['name']}' has an invalid environment section."
+        )
+
+    for key, value in compose_environment.items():
+        key = str(key)
+        if key in overrides:
+            continue
+        if value is None:
+            if key in interpolation:
+                environment[key] = interpolation[key]
+            continue
+        environment[key] = _interpolate_compose_value(
+            str(value), interpolation, service["name"]
+        )
+
+    environment.update(overrides)
+    for key, value in environment.items():
+        value = _resolve_service_endpoints(value, endpoints)
+        for unavailable in set(external_services):
+            if unavailable and re.search(
+                r"(?P<scheme>https?://|mongodb(?:\+srv)?://|postgres(?:ql)?://|redis://)"
+                + re.escape(unavailable)
+                + r"(?::\d+)?(?=[:/]|$)",
+                value,
+                re.IGNORECASE,
+            ):
+                raise click.ClickException(
+                    f"Service '{service['name']}' still references Compose hostname "
+                    f"'{unavailable}'. Stateful services must use their managed database/cache "
+                    "endpoint; web-service URLs are supplied by EBKit."
+                )
+        environment[key] = value
+    return environment
+
+
+def _compose_build_args(service: Dict, interpolation: Dict[str, str]) -> Dict[str, str]:
+    build = service["build"]
+    if not isinstance(build, dict):
+        return {}
+    args = build.get("args", {}) or {}
+    if isinstance(args, list):
+        args = {str(item): interpolation.get(str(item), "") for item in args}
+    if not isinstance(args, dict):
+        raise click.ClickException(
+            f"Compose service '{service['name']}' build args must be a mapping or list."
+        )
+    return {
+        str(key): _interpolate_compose_value(str(value), interpolation, service["name"])
+        for key, value in args.items()
+        if value is not None
+    }
+
+
+def _stage_compose_service(
+    service: Dict, endpoints: Dict[str, str]
+) -> tempfile.TemporaryDirectory:
+    staged = tempfile.TemporaryDirectory(prefix=f"ebkit-{service['name']}-")
+    staged_context = Path(staged.name) / "app"
+    try:
+        shutil.copytree(
+            service["context"],
+            staged_context,
+            ignore=shutil.ignore_patterns(
+                ".git", "node_modules", ".venv", "venv", "__pycache__", ".env"
+            ),
+        )
+        config_files = (
+            path
+            for path in staged_context.rglob("*")
+            if path.is_file()
+            and path.suffix.lower() in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+            and "node_modules" not in path.parts
+            and path.stat().st_size <= 1_000_000
+        )
+        for config_path in config_files:
+            original = config_path.read_text(encoding="utf-8", errors="ignore")
+            updated = original
+            for dependency, endpoint in endpoints.items():
+                variable = "EBKIT_SERVICE_" + re.sub(
+                    r"[^A-Za-z0-9]+", "_", dependency
+                ).upper() + "_URL"
+                proxy_pattern = re.compile(
+                    r"""target\s*:\s*(['"])https?://"""
+                    + re.escape(dependency)
+                    + r"""(?::\d+)?\1"""
+                )
+                updated = proxy_pattern.sub(
+                    f"target: process.env.{variable} || '{endpoint}'", updated
+                )
+                updated = re.sub(
+                    r"(?P<scheme>https?://)" + re.escape(dependency) + r"(?=[:/]|$)",
+                    lambda match: match.group("scheme") + urlsplit(endpoint).netloc,
+                    updated,
+                )
+            if updated != original:
+                config_path.write_text(updated, encoding="utf-8")
+
+        dockerfile_relative = service["dockerfile"].relative_to(service["context"])
+        service["staged_context"] = staged_context
+        service["staged_dockerfile"] = staged_context / dockerfile_relative
+    except Exception:
+        staged.cleanup()
+        raise
+    return staged
+
+
 def _load_env_file(env_file: Optional[str]) -> Dict[str, str]:
     env_vars: Dict[str, str] = {}
     if not env_file or not os.path.exists(env_file):
@@ -249,7 +688,7 @@ def _collect_env_vars(
             k, _, v = kv.partition("=")
             merged[k.strip()] = v.strip()
         else:
-            _warn(f"Ignoring invalid --env item '{kv}' (expected KEY=VALUE)")
+            _warn("Ignoring invalid --env item (expected KEY=VALUE).")
 
     if is_interactive and merged:
         _info(f"Loaded {len(merged)} environment variable(s).")
@@ -257,7 +696,12 @@ def _collect_env_vars(
         if placeholders:
             click.echo(click.style(f"[!] {len(placeholders)} variable(s) appear unset or placeholders:", fg="yellow"))
             for k in placeholders[:5]:
-                val = click.prompt(f"    {k}", default="", show_default=False)
+                val = click.prompt(
+                    f"    {k}",
+                    default="",
+                    show_default=False,
+                    hide_input=_is_secret_environment_variable(k),
+                )
                 if val:
                     merged[k] = val
 
@@ -388,7 +832,11 @@ def _ensure_eb_application(eb_client, app_name: str) -> None:
 
 
 def _build_cluster_option_settings(
-    infra: Dict, env_vars: Dict[str, str], port: int = 8080
+    infra: Dict,
+    env_vars: Dict[str, str],
+    port: int = 8080,
+    alb_scheme: str = "internet-facing",
+    healthcheck_path: Optional[str] = None,
 ) -> List[Dict]:
     opts = [
         {"Namespace": "aws:elasticbeanstalk:eks", "OptionName": "cluster-role", "Value": infra["cluster_role"]},
@@ -401,9 +849,16 @@ def _build_cluster_option_settings(
         {"Namespace": "aws:elasticbeanstalk:eks:environment", "OptionName": "memory", "Value": "512Mi"},
         {"Namespace": "aws:elasticbeanstalk:eks:environment", "OptionName": "memory-limit", "Value": "1Gi"},
         {"Namespace": "aws:elasticbeanstalk:eks:environment", "OptionName": "load-balancer-type", "Value": "ALB"},
+        {"Namespace": "aws:elasticbeanstalk:eks:alb", "OptionName": "scheme", "Value": alb_scheme},
         {"Namespace": "aws:elasticbeanstalk:eks:environment:autoscaling", "OptionName": "min-replica", "Value": "1"},
         {"Namespace": "aws:elasticbeanstalk:eks:environment:autoscaling", "OptionName": "max-replica", "Value": "5"},
     ]
+    if healthcheck_path:
+        opts.append({
+            "Namespace": "aws:elasticbeanstalk:eks:alb",
+            "OptionName": "healthcheck-path",
+            "Value": healthcheck_path,
+        })
     if infra.get("subnets"):
         opts.append({
             "Namespace": "aws:elasticbeanstalk:eks:environment",
@@ -419,19 +874,19 @@ def _build_cluster_option_settings(
         "Value": json.dumps(all_env),
     })
 
-    for k, v in all_env.items():
-        opts.append({
-            "Namespace": "aws:elasticbeanstalk:application:environment",
-            "OptionName": k,
-            "Value": str(v),
-        })
-
     return opts
 
 
 def _ensure_cluster_environment(
-    eb_client, app_name: str, env_name: str,
-    version_label: str, infra: Dict, env_vars: Dict[str, str], port: int = 8080
+    eb_client,
+    app_name: str,
+    env_name: str,
+    version_label: str,
+    infra: Dict,
+    env_vars: Dict[str, str],
+    port: int = 8080,
+    alb_scheme: str = "internet-facing",
+    healthcheck_path: Optional[str] = None,
 ) -> bool:
     envs = eb_client.describe_environments(
         ApplicationName=app_name, EnvironmentNames=[env_name], IncludeDeleted=False
@@ -443,7 +898,9 @@ def _ensure_cluster_environment(
         return False
 
     _info(f"Creating new Elastic Beanstalk Cluster Mode environment '{env_name}'...")
-    option_settings = _build_cluster_option_settings(infra, env_vars, port)
+    option_settings = _build_cluster_option_settings(
+        infra, env_vars, port, alb_scheme, healthcheck_path
+    )
     create_args = {
         "ApplicationName": app_name,
         "EnvironmentName": env_name,
@@ -577,18 +1034,19 @@ def _prompt_region(saved_region: Optional[str]) -> str:
 @click.command()
 @click.argument("source", default=".", required=False)
 @click.option("--app", help="Elastic Beanstalk Application name")
-@click.option("--env", help="Elastic Beanstalk Environment name")
+@click.option("--environment", "--env-name", "environment_name", help="Elastic Beanstalk Environment name or multi-tier prefix")
 @click.option("--region", help="AWS Region (e.g. us-east-2)")
 @click.option("--tag", help="ECR image tag / URI (skips build+push if existing)")
 @click.option("--repo", help="ECR repository name (default: app name)")
 @click.option("--port", default=None, type=int, help="Application container port (default: auto-detect)")
+@click.option("--compose", "compose_deploy", is_flag=True, help="Deploy built HTTP services from Compose to separate Cluster environments; use external databases/caches")
 @click.option("--no-build", is_flag=True, default=False, help="Skip Docker build")
 @click.option("--no-push", is_flag=True, default=False, help="Skip Docker push to ECR")
 @click.option("--wait/--no-wait", default=True, help="Wait for environment Ready status & live URL")
 @click.option("--env-file", default=None, help="Path to .env file with environment variables")
 @click.option("--env", "extra_env", multiple=True, metavar="KEY=VALUE", help="Additional environment variable(s)")
 @click.option("-y", "--yes", is_flag=True, default=False, help="Skip interactive prompts (CI/CD mode)")
-def deploy(source, app, env, region, tag, repo, port, no_build, no_push, wait, env_file, extra_env, yes):
+def deploy(source, app, environment_name, region, tag, repo, port, compose_deploy, no_build, no_push, wait, env_file, extra_env, yes):
     """
     Deploy any containerized web app to AWS Elastic Beanstalk Cluster Mode.
 
@@ -599,7 +1057,8 @@ def deploy(source, app, env, region, tag, repo, port, no_build, no_push, wait, e
     Examples:
       ebkit deploy
       ebkit deploy https://github.com/user/my-repo
-      ebkit deploy ./notes-app --app notes-app --env notes-app-dev --region us-east-2 -y
+      ebkit deploy ./notes-app --app notes-app --environment notes-app-dev --region us-east-2 -y
+      ebkit deploy ./devboard --compose --app devboard --environment devboard-prod --region us-east-2 -y
     """
     is_interactive = not yes and sys.stdin.isatty()
     temp_clone_dir: Optional[Path] = None
@@ -630,22 +1089,367 @@ def deploy(source, app, env, region, tag, repo, port, no_build, no_push, wait, e
             sys.exit(1)
 
     try:
-        _execute_deploy(
-            proj_dir=proj_dir, app=app, env=env, region=region, tag=tag,
-            repo=repo, port=port, no_build=no_build, no_push=no_push,
-            wait=wait, env_file=env_file, extra_env=extra_env,
-            is_interactive=is_interactive,
-        )
+        if compose_deploy:
+            _execute_compose_deploy(
+                proj_dir=proj_dir,
+                app=app,
+                environment_prefix=environment_name,
+                region=region,
+                repo=repo,
+                env_file=env_file,
+                extra_env=extra_env,
+                is_interactive=is_interactive,
+                tag=tag,
+                port=port,
+                no_build=no_build,
+                no_push=no_push,
+                wait=wait,
+            )
+        else:
+            _execute_deploy(
+                proj_dir=proj_dir, app=app, env=environment_name, region=region, tag=tag,
+                repo=repo, port=port, no_build=no_build, no_push=no_push,
+                wait=wait, env_file=env_file, extra_env=extra_env,
+                is_interactive=is_interactive,
+            )
     finally:
         if temp_clone_dir and temp_clone_dir.exists():
             shutil.rmtree(temp_clone_dir, ignore_errors=True)
             _info("Cleaned up temporary workspace.")
 
 
+def _execute_compose_deploy(
+    proj_dir: Path,
+    app: Optional[str],
+    environment_prefix: Optional[str],
+    region: Optional[str],
+    repo: Optional[str],
+    env_file: Optional[str],
+    extra_env: Tuple[str, ...],
+    is_interactive: bool,
+    tag: Optional[str],
+    port: Optional[int],
+    no_build: bool,
+    no_push: bool,
+    wait: bool,
+) -> None:
+    if tag or port is not None or no_build or no_push:
+        raise click.ClickException(
+            "--compose builds and tags each service separately; --tag, --port, --no-build, "
+            "and --no-push are not supported in Compose mode."
+        )
+    if not wait:
+        raise click.ClickException(
+            "--compose requires --wait so dependent services can receive the deployed URLs."
+        )
+    if env_file and not Path(env_file).is_file():
+        raise click.ClickException(f"Environment file not found: {env_file}")
+
+    services, external_services = _load_compose_web_services(proj_dir)
+    interpolation = _load_env_file(str(proj_dir / ".env"))
+    if env_file:
+        interpolation.update(_load_env_file(env_file))
+    interpolation.update(os.environ)
+    for item in extra_env:
+        key, separator, value = item.partition("=")
+        if not separator or not key.strip():
+            raise click.ClickException("Invalid --env value. Expected KEY=VALUE.")
+        interpolation[key.strip()] = value.strip()
+    _resolve_missing_database_variables(services, interpolation, is_interactive)
+    if external_services:
+        _info(
+            "Compose services without Docker builds are treated as external dependencies: "
+            + ", ".join(external_services)
+        )
+    stateful_dependencies = {
+        dependency["name"]: dependency
+        for service in services
+        for dependency in service.get("stateful_dependencies", [])
+    }
+    if stateful_dependencies:
+        descriptions = [
+            f"{name} ({dependency['database_type'] or dependency['role']})"
+            for name, dependency in stateful_dependencies.items()
+        ]
+        _info("Detected external database/cache services: " + ", ".join(descriptions))
+    database_connections_detected = bool(stateful_dependencies)
+    saved_cfg = load_config()
+    if not region:
+        region = (
+            getattr(saved_cfg, "aws_region", None)
+            or os.environ.get("AWS_DEFAULT_REGION")
+            or "us-east-2"
+        )
+    if not app:
+        saved_app = getattr(saved_cfg, "aws_application", None)
+        app = saved_app if saved_app and saved_app != "my-app" else proj_dir.name.lower().replace("_", "-").replace(" ", "-")
+    if not environment_prefix:
+        environment_prefix = f"{app}-prod"
+    endpoints: Dict[str, str] = {}
+    deployed = []
+    for service in services:
+        service_name = service["name"]
+        service_env = _compose_service_environment(
+            service,
+            proj_dir,
+            interpolation,
+            {},
+            endpoints,
+            external_services,
+        )
+        _validate_database_environment(service_env)
+        connections = {
+            (database_type, provider)
+            for key, value in service_env.items()
+            if _DATABASE_ENV_KEY.search(key)
+            for database_type in [_database_type_from_uri(value)]
+            for provider in [_database_provider(value)]
+            if database_type or provider
+        }
+        if connections:
+            database_connections_detected = True
+            _info(
+                f"Detected database configuration for service '{service_name}': "
+                + ", ".join(
+                    " via ".join(part for part in connection if part)
+                    for connection in sorted(connections)
+                )
+            )
+        elif any(
+            _DATABASE_ENV_KEY.search(key) and value
+            for key, value in service_env.items()
+        ):
+            database_connections_detected = True
+        staged = _stage_compose_service(service, endpoints)
+        try:
+            app_name = app
+            env_name = _service_resource_name(environment_prefix, service_name, 40)
+            repo_name = _service_resource_name(repo or app, service_name, 256)
+            is_frontend = service["role"] == "frontend"
+            image_build_args = {
+                key: _resolve_service_endpoints(value, endpoints)
+                for key, value in _compose_build_args(service, interpolation).items()
+            }
+            image_build_args.update({
+                key: value for key, value in service_env.items()
+                if key.startswith(("VITE_", "NEXT_PUBLIC_", "REACT_APP_", "PUBLIC_"))
+            })
+            click.echo(
+                f"Deploying Compose service '{service_name}' to "
+                f"Elastic Beanstalk environment '{env_name}'..."
+            )
+            status = _execute_deploy(
+                proj_dir=service["staged_context"],
+                app=app_name,
+                env=env_name,
+                region=region,
+                tag=None,
+                repo=repo_name,
+                port=_detect_service_port(service),
+                no_build=False,
+                no_push=False,
+                wait=True,
+                env_file=None,
+                extra_env=tuple(f"{key}={value}" for key, value in service_env.items()),
+                is_interactive=False,
+                write_config=False,
+                dockerfile=service["staged_dockerfile"],
+                build_args=image_build_args,
+                alb_scheme="internet-facing" if is_frontend else "internal",
+                healthcheck_path="/" if is_frontend else "/health",
+            )
+        finally:
+            staged.cleanup()
+        if status.get("status") != "Ready" or str(status.get("health", "")).lower() not in (
+            "green",
+            "ok",
+        ):
+            raise click.ClickException(
+                f"Compose service '{service_name}' did not become healthy; later services "
+                "were not deployed."
+            )
+        endpoint = status.get("url")
+        if not endpoint:
+            raise click.ClickException(
+                f"Compose service '{service_name}' is healthy, but Elastic Beanstalk returned "
+                "no service URL."
+            )
+        endpoints[service_name] = endpoint
+        deployed.append((service_name, endpoint))
+
+    click.echo("")
+    click.echo("Compose HTTP services reached healthy status:")
+    for service_name, endpoint in deployed:
+        click.echo(f"  {service_name}: {endpoint}")
+    if external_services:
+        click.echo(
+            "External dependencies (not deployed by EBKit): "
+            + ", ".join(external_services)
+        )
+    if database_connections_detected:
+        _warn(
+            "Elastic Beanstalk health confirms HTTP service health only; database connectivity "
+            "is verified only if your application's health endpoint checks it."
+        )
+        _info(
+            "EBKit does not run migrations automatically. Run the application's documented "
+            "migration command against the managed database before relying on the deployment."
+        )
+
+
+def _compose_environment_entries(service: Dict) -> Dict[str, object]:
+    entries = service["config"].get("environment", {})
+    if isinstance(entries, list):
+        parsed = {}
+        for entry in entries:
+            key, separator, value = str(entry).partition("=")
+            parsed[key] = value if separator else None
+        return parsed
+    if not isinstance(entries, dict):
+        raise click.ClickException(
+            f"Compose service '{service['name']}' has an invalid environment section."
+        )
+    return {str(key): value for key, value in entries.items()}
+
+
+def _resolve_missing_database_variables(
+    services: List[Dict],
+    interpolation: Dict[str, str],
+    is_interactive: bool,
+) -> None:
+    required = []
+    for service in services:
+        for key, raw_value in _compose_environment_entries(service).items():
+            value = "" if raw_value is None else str(raw_value)
+            references = [
+                (match.group(1), match.group(2))
+                for match in _ENV_REFERENCE.finditer(value)
+                if match.group(1)
+                and match.group(1) not in interpolation
+                and match.group(2) is None
+            ]
+            references = [
+                reference
+                for reference in references
+                if _DATABASE_ENV_KEY.search(key)
+                or _DATABASE_ENV_KEY.search(reference[0])
+            ]
+            if _DATABASE_ENV_KEY.search(key):
+                if raw_value is None and key not in interpolation:
+                    references.append((key, None))
+                elif not references and not value and key not in interpolation:
+                    references.append((key, None))
+            for variable, _default in references:
+                if variable not in required:
+                    required.append(variable)
+
+    for variable in required:
+        if not is_interactive:
+            raise click.ClickException(
+                f"Required database variable '{variable}' is unset. Add it to a gitignored "
+                ".env file, pass --env-file, or use --env KEY=VALUE."
+            )
+        value = click.prompt(
+            f"Enter value for {variable}",
+            hide_input=_is_secret_environment_variable(variable),
+            show_default=False,
+        )
+        if not value:
+            raise click.ClickException(f"Database variable '{variable}' cannot be empty.")
+        interpolation[variable] = value
+
+
+def _database_provider(value: str) -> Optional[str]:
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", value, re.IGNORECASE):
+        return None
+    try:
+        host = urlsplit(value).hostname or ""
+    except ValueError:
+        return None
+    host = host.lower()
+    if host.endswith(".rds.amazonaws.com"):
+        return "Amazon RDS"
+    if host.endswith(".neon.tech"):
+        return "Neon"
+    if host.endswith(".supabase.co"):
+        return "Supabase"
+    if host.endswith(".mongodb.net"):
+        return "MongoDB Atlas"
+    if host.endswith(".upstash.io"):
+        return "Upstash"
+    if host.endswith(".redis-cloud.com") or host.endswith(".redislabs.com"):
+        return "Redis Cloud"
+    if host.endswith(".cache.amazonaws.com"):
+        return "Amazon ElastiCache"
+    return "managed external provider"
+
+
+def _database_type_from_uri(value: str) -> Optional[str]:
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", value, re.IGNORECASE):
+        return None
+    scheme = urlsplit(value).scheme.lower()
+    if scheme in ("postgres", "postgresql") or scheme.startswith(
+        ("postgresql+", "postgres+")
+    ):
+        return "PostgreSQL"
+    if scheme in ("mysql", "mariadb") or scheme.startswith(("mysql+", "mariadb+")):
+        return "MySQL-compatible"
+    if scheme in ("mongodb", "mongodb+srv"):
+        return "MongoDB"
+    if scheme in ("redis", "rediss"):
+        return "Redis"
+    return None
+
+
+def _validate_database_environment(environment: Dict[str, str]) -> None:
+    schemes = {
+        "postgres": "PostgreSQL",
+        "postgresql": "PostgreSQL",
+        "mysql": "MySQL",
+        "mariadb": "MariaDB",
+        "mongodb": "MongoDB",
+        "mongodb+srv": "MongoDB",
+        "redis": "Redis",
+        "rediss": "Redis",
+    }
+    for key, value in environment.items():
+        if not _DATABASE_ENV_KEY.search(key) or not re.match(
+            r"^[a-z][a-z0-9+.-]*://", value, re.IGNORECASE
+        ):
+            continue
+        try:
+            parsed = urlsplit(value)
+            host = parsed.hostname
+        except ValueError:
+            host = None
+            parsed = urlsplit("")
+        scheme = parsed.scheme.lower()
+        if scheme in ("sqlite", "file"):
+            raise click.ClickException(
+                f"Database variable '{key}' uses a local-file database, which is not suitable "
+                "for a persistent multi-service deployment. Use a managed database endpoint."
+            )
+        supported_driver_scheme = scheme.startswith(
+            ("postgresql+", "postgres+", "mysql+", "mariadb+")
+        )
+        if scheme not in schemes and not supported_driver_scheme:
+            raise click.ClickException(
+                f"Database variable '{key}' uses an unsupported connection scheme. "
+                "Supported URI schemes are PostgreSQL, MySQL/MariaDB, MongoDB, and Redis."
+            )
+        if not host or host.lower() in ("localhost", "127.0.0.1", "::1"):
+            raise click.ClickException(
+                f"Database variable '{key}' must contain a reachable managed database hostname."
+            )
+
+
 def _execute_deploy(
     proj_dir: Path, app, env, region, tag, repo, port,
-    no_build, no_push, wait, env_file, extra_env, is_interactive
-):
+    no_build, no_push, wait, env_file, extra_env, is_interactive, write_config=True,
+    dockerfile: Optional[Path] = None, build_args: Optional[Dict[str, str]] = None,
+    alb_scheme: str = "internet-facing",
+    healthcheck_path: Optional[str] = None,
+) -> Dict:
     saved_cfg = load_config()
 
     # 1. AWS Region
@@ -686,7 +1490,7 @@ def _execute_deploy(
     # 5. Application Port
     if not port:
         port = 8080
-        dockerfile = proj_dir / "Dockerfile"
+        dockerfile = dockerfile or proj_dir / "Dockerfile"
         if dockerfile.exists():
             try:
                 for line in dockerfile.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -757,12 +1561,18 @@ def _execute_deploy(
 
     # 10. Build & Push
     if not no_build:
-        dockerfile = proj_dir / "Dockerfile"
+        dockerfile = dockerfile or proj_dir / "Dockerfile"
         if not dockerfile.exists():
             _err(f"Dockerfile not found at {dockerfile}. Please run 'ebkit init' first.")
             sys.exit(1)
         _info(f"Building Docker image '{tag}'...")
-        res = subprocess.run(["docker", "build", "-t", tag, str(proj_dir)], check=False)
+        build_command = ["docker", "build", "-t", tag]
+        if dockerfile:
+            build_command.extend(["-f", str(dockerfile)])
+        for key, value in (build_args or {}).items():
+            build_command.extend(["--build-arg", f"{key}={value}"])
+        build_command.append(str(proj_dir))
+        res = subprocess.run(build_command, check=False)
         if res.returncode != 0:
             _err("Docker build failed.")
             sys.exit(1)
@@ -786,40 +1596,30 @@ def _execute_deploy(
     _register_cluster_version(eb_client, app, version_label, tag, region)
 
     # 13. Write local config
-    _write_eb_config(proj_dir, app, env, region)
+    if write_config:
+        _write_eb_config(proj_dir, app, env, region)
 
     # 14. Launch or Update Environment
-    is_new = _ensure_cluster_environment(eb_client, app, env, version_label, infra, env_vars, port)
+    is_new = _ensure_cluster_environment(
+        eb_client,
+        app,
+        env,
+        version_label,
+        infra,
+        env_vars,
+        port,
+        alb_scheme,
+        healthcheck_path,
+    )
     if not is_new:
         _info(f"Applying version '{version_label}' to '{env}'...")
         update_kwargs = {
             "EnvironmentName": env,
             "VersionLabel": version_label,
         }
-        # Check environment tier to determine correct OptionSettings namespace
-        try:
-            target_envs = eb_client.describe_environments(
-                ApplicationName=app, EnvironmentNames=[env], IncludeDeleted=False
-            ).get("Environments", [])
-            tier_name = target_envs[0].get("Tier", {}).get("Name", "WebServer") if target_envs else "WebServer"
-            update_opts = []
-            if tier_name == "Cluster":
-                update_opts.append({
-                    "Namespace": "aws:elasticbeanstalk:eks:environment",
-                    "OptionName": "env-variables",
-                    "Value": json.dumps({**env_vars, "PORT": str(port)}),
-                })
-            elif env_vars:
-                for k, v in env_vars.items():
-                    update_opts.append({
-                        "Namespace": "aws:elasticbeanstalk:application:environment",
-                        "OptionName": k,
-                        "Value": str(v),
-                    })
-            if update_opts:
-                update_kwargs["OptionSettings"] = update_opts
-        except Exception:
-            pass
+        update_kwargs["OptionSettings"] = _build_cluster_option_settings(
+            infra, env_vars, port, alb_scheme, healthcheck_path
+        )
 
         eb_client.update_environment(**update_kwargs)
         _ok("Environment update initiated.")
@@ -853,6 +1653,7 @@ def _execute_deploy(
         click.echo("")
         click.echo(click.style(f"   Console: https://console.aws.amazon.com/elasticbeanstalk/home?region={region}", fg="cyan"))
     click.echo(click.style("=" * 64, fg="green"))
+    return final_status
 
 
 deploy_command = deploy
