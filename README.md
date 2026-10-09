@@ -75,8 +75,22 @@ The first deployment may create IAM roles, a CodeBuild project, an ECR repositor
 
 The source bundle must have the Dockerfile at its root. Do not put an extra parent folder around the files inside a ZIP; EBKit builds directly from the GitHub repository root.
 
-### Options
+### AWS IAM permissions and roles
 
+The AWS identity used to run `ebkit deploy` must be allowed to provision the deployment resources. Having permission to deploy one application does not necessarily grant permission to create the roles or resources for another. In particular, EBKit creates a repository-specific CodeBuild service role; AWS may reject a first deployment with `AccessDenied` for `iam:CreateRole` before the image build starts.
+
+Ask your AWS administrator to authorize the deploy identity for the following operations, scoped to the account, region, resource names, and role ARNs where supported:
+
+- **IAM role setup:** `iam:GetRole`, `iam:CreateRole`, `iam:AttachRolePolicy`, and `iam:PutRolePolicy`; `iam:PassRole` for the repository-specific CodeBuild role and the Cluster, node, and observability roles; and `iam:CreateServiceLinkedRole` for `elasticbeanstalk.amazonaws.com` when that service-linked role is not already present.
+- **Cluster service roles:** permission to attach the AWS-managed policies used by Cluster Mode. EBKit checks or creates `aws-elasticbeanstalk-eks-cluster-role`, `aws-elasticbeanstalk-eks-node-role`, and `aws-elasticbeanstalk-eks-observability-role`. These roles trust EKS or EC2 as appropriate and use the EKS cluster, worker-node, ECR read-only, CNI, Elastic Beanstalk platform, and CloudWatch Agent policies.
+- **Build role:** permission to create or update the repository-specific CodeBuild project and start/read its builds. EBKit adds an inline policy to its CodeBuild role for ECR image upload and CloudWatch Logs writes.
+- **Deployment resources:** permissions for the required ECR repository operations, Elastic Beanstalk application/version/environment create or update operations, and EC2 default VPC/subnet reads.
+
+The IAM identity that runs EBKit is separate from the service roles used by CodeBuild and Elastic Beanstalk. The deploy identity needs permission to pass the service roles to AWS; AWS services then assume those roles using their trust policies. Do not solve an access-denied error by sharing credentials or granting unrestricted administrator access. Have an administrator review and approve a least-privilege policy for your account. If the roles already exist, the deploy identity still needs permission to read and use them, and to pass them where required.
+
+An earlier successful deployment may have used roles that were already present or an AWS identity with broader permissions. A later deployment can still fail if it needs a new role, such as the CodeBuild role for a different repository.
+
+### Options
 | Option | What it does |
 |---|---|
 | `SOURCE` | Required public GitHub repository URL |
@@ -129,7 +143,7 @@ The wizard scans the project and can generate files such as `Dockerfile`, `.dock
 
 ### AWS credentials or permissions
 
-Run `aws sts get-caller-identity` and confirm you are using the intended account. If access is denied, ask your AWS administrator to grant the permissions required for Elastic Beanstalk Cluster Mode, CodeBuild, ECR image push/pull, IAM role setup, and target network resources.
+Run `aws sts get-caller-identity` and confirm you are using the intended account. If access is denied, note the denied action and resource, then ask your AWS administrator to review the [IAM permissions and roles](#aws-iam-permissions-and-roles) needed for Elastic Beanstalk Cluster Mode, CodeBuild, ECR, and the target network. An `iam:CreateRole` denial occurs during provisioning; retrying unchanged credentials will not resolve it.
 
 ### Build or deployment failed
 
