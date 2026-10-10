@@ -14,6 +14,7 @@ from ebkit.commands.deploy import (
     _execute_deploy,
     _make_application_version_label,
     _register_cluster_version,
+    _verify_ecr_image,
     _wait_for_codebuild,
     deploy,
 )
@@ -83,7 +84,8 @@ def test_deploy_rejects_local_paths_and_removed_deployment_options():
             deploy, ["https://github.com/example/app", option]
         )
         assert removed_option.exit_code != 0
-        assert f"No such option: {option}" in removed_option.output
+        assert "No such option" in removed_option.output
+        assert option in removed_option.output
 
 
 def test_deploy_requires_source_url():
@@ -93,7 +95,8 @@ def test_deploy_requires_source_url():
     assert "Missing argument 'SOURCE'" in result.output
 
 
-def test_execute_deploy_uses_codebuild_and_never_runs_local_docker(monkeypatch):
+def test_execute_deploy_uses_codebuild_and_never_runs_local_docker(monkeypatch, tmp_path):
+    monkeypatch.setenv("EBKIT_STATE_FILE", str(tmp_path / "deployments.json"))
     monkeypatch.setattr("ebkit.commands.deploy.load_config", lambda: None)
     monkeypatch.setattr(
         "ebkit.commands.deploy._check_aws_credentials",
@@ -104,6 +107,7 @@ def test_execute_deploy_uses_codebuild_and_never_runs_local_docker(monkeypatch):
         lambda *_args: {},
     )
     monkeypatch.setattr("ebkit.commands.deploy._ensure_ecr_repo", lambda *_args: "ecr-uri")
+    monkeypatch.setattr("ebkit.commands.deploy._verify_ecr_image", lambda *_args: None)
     monkeypatch.setattr(
         "ebkit.commands.deploy._provision_cluster_infrastructure",
         lambda *_args: {
@@ -121,10 +125,13 @@ def test_execute_deploy_uses_codebuild_and_never_runs_local_docker(monkeypatch):
     monkeypatch.setattr("ebkit.commands.deploy.boto3.Session", lambda **_kwargs: session)
 
     with (
-        patch("ebkit.commands.deploy._build_image_in_aws") as build_in_aws,
+        patch(
+            "ebkit.commands.deploy._build_image_in_aws",
+            return_value={"project_name": "build-project", "build_id": "build:123"},
+        ) as build_in_aws,
         patch("ebkit.commands.deploy.subprocess.run") as local_command,
     ):
-        _execute_deploy(
+        result = _execute_deploy(
             source_url="https://github.com/example/notes-app",
             app="notes-app",
             env="notes-app-cluster",
@@ -143,6 +150,12 @@ def test_execute_deploy_uses_codebuild_and_never_runs_local_docker(monkeypatch):
         "123456789012.dkr.ecr.us-east-2.amazonaws.com/notes-app:v"
     )
     assert local_command.call_count == 0
+    assert result["status"] == "Deploying"
+    state = json.loads((tmp_path / "deployments.json").read_text(encoding="utf-8"))
+    deployment = state["deployments"][0]
+    assert deployment["source_url"] == "https://github.com/example/notes-app"
+    assert deployment["codebuild_project"] == "build-project"
+    assert deployment["build_id"] == "build:123"
 
 
 def test_codebuild_failure_reports_status_and_logs_url():
@@ -163,6 +176,38 @@ def test_codebuild_failure_reports_status_and_logs_url():
         assert "https://console.aws.amazon.com/codebuild/log" in str(exc)
     else:
         raise AssertionError("Expected a failed CodeBuild build to raise.")
+
+
+def test_deploy_verifies_image_manifest_exists_in_ecr():
+    ecr_client = MagicMock()
+    ecr_client.describe_images.return_value = {
+        "imageDetails": [{"imageDigest": "sha256:abc123"}]
+    }
+
+    _verify_ecr_image(
+        ecr_client,
+        "717056864326.dkr.ecr.us-east-2.amazonaws.com/notes-app:v1",
+    )
+
+    ecr_client.describe_images.assert_called_once_with(
+        repositoryName="notes-app",
+        imageIds=[{"imageTag": "v1"}],
+    )
+
+
+def test_deploy_fails_if_codebuild_image_is_missing_from_ecr():
+    ecr_client = MagicMock()
+    ecr_client.describe_images.return_value = {"imageDetails": []}
+
+    try:
+        _verify_ecr_image(
+            ecr_client,
+            "717056864326.dkr.ecr.us-east-2.amazonaws.com/notes-app:v1",
+        )
+    except RuntimeError as exc:
+        assert "does not contain image" in str(exc)
+    else:
+        raise AssertionError("Expected deployment to fail when the ECR image is absent.")
 
 
 def test_register_cluster_version_uses_image_configuration():

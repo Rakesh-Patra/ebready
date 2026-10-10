@@ -17,6 +17,13 @@ if hasattr(sys.stderr, "reconfigure"):
 
 from ebkit.commands.init import init_command
 from ebkit.commands.deploy import deploy_command
+from ebkit.commands.operations import (
+    destroy_command,
+    diagnose_command,
+    envlist_command,
+    logs_command,
+    status_command,
+)
 
 
 @click.group()
@@ -29,6 +36,11 @@ def cli() -> None:
 
 cli.add_command(init_command, name="init")
 cli.add_command(deploy_command, name="deploy")
+cli.add_command(status_command, name="status")
+cli.add_command(logs_command, name="logs")
+cli.add_command(diagnose_command, name="diagnose")
+cli.add_command(envlist_command, name="envlist")
+cli.add_command(destroy_command, name="destroy")
 
 
 def main() -> None:

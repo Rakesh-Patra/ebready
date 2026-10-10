@@ -13,9 +13,10 @@ from urllib.parse import urlsplit
 
 import boto3
 import click
-from botocore.exceptions import ClientError, ParamValidationError
+from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 
 from ebkit.config import load_config
+from ebkit.deployment_state import save_deployment
 from ebkit.repo_handler import validate_github_url
 
 _COMMON_REGIONS = [
@@ -250,6 +251,24 @@ def _ensure_ecr_repo(ecr_client, repo_name: str) -> str:
     return response["repositories"][0]["repositoryUri"]
 
 
+def _verify_ecr_image(ecr_client, image_uri: str) -> None:
+    image_reference = image_uri.rsplit("/", 1)[-1]
+    repository_name, separator, image_tag = image_reference.rpartition(":")
+    if not separator or not repository_name or not image_tag:
+        raise RuntimeError(f"Could not determine ECR image repository and tag from '{image_uri}'.")
+    try:
+        images = ecr_client.describe_images(
+            repositoryName=repository_name,
+            imageIds=[{"imageTag": image_tag}],
+        ).get("imageDetails", [])
+    except (BotoCoreError, ClientError) as exc:
+        raise RuntimeError(f"Could not verify ECR image '{image_uri}': {exc}") from exc
+    if not images or not images[0].get("imageDigest"):
+        raise RuntimeError(
+            f"CodeBuild completed but ECR does not contain image '{image_uri}'."
+        )
+
+
 def _codebuild_names(app_name: str, repo_url: str) -> Tuple[str, str]:
     parsed = urlsplit(repo_url)
     owner, repo = parsed.path.strip("/").removesuffix(".git").split("/")
@@ -257,6 +276,13 @@ def _codebuild_names(app_name: str, repo_url: str) -> Tuple[str, str]:
     slug = re.sub(r"[^A-Za-z0-9_-]", "-", full_name).strip("-") or "app"
     suffix = f"{slug[:36].rstrip('-')}-{hashlib.sha256(full_name.encode()).hexdigest()[:8]}"
     return f"ebkit-{suffix}-image-build", f"ebkit-{suffix}-build-role"
+
+
+def _persist_deployment(deployment: Dict) -> None:
+    try:
+        save_deployment(deployment)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Could not save deployment state: {exc}") from exc
 
 
 def _wait_for_codebuild(codebuild_client, build_id: str, timeout: int = 3600) -> None:
@@ -293,7 +319,7 @@ def _build_image_in_aws(
     repo_name: str,
     repo_url: str,
     image_uri: str,
-) -> None:
+) -> Dict[str, str]:
     parsed = urlsplit(repo_url)
     github_location = f"https://github.com{parsed.path.rstrip('/').removesuffix('.git')}.git"
     project_name, role_name = _codebuild_names(app_name, github_location)
@@ -376,7 +402,9 @@ def _build_image_in_aws(
             {"name": "EBKIT_IMAGE_URI", "value": image_uri, "type": "PLAINTEXT"},
         ],
     )
-    _wait_for_codebuild(codebuild_client, result["build"]["id"])
+    build_id = result["build"]["id"]
+    _wait_for_codebuild(codebuild_client, build_id)
+    return {"project_name": project_name, "build_id": build_id}
 
 
 def _ensure_eb_application(eb_client, app_name: str) -> None:
@@ -562,6 +590,18 @@ def _execute_deploy(
     image_uri = (
         f"{account_id}.dkr.ecr.{region}.amazonaws.com/{app}:v{int(time.time())}"
     )
+    codebuild_project, _ = _codebuild_names(app, source_url)
+    deployment = {
+        "account_id": account_id,
+        "region": region,
+        "application_name": app,
+        "environment_name": env,
+        "source_url": source_url,
+        "port": port,
+        "image_uri": image_uri,
+        "codebuild_project": codebuild_project,
+        "status": "BUILDING",
+    }
     if is_interactive:
         _table(
             [
@@ -576,11 +616,12 @@ def _execute_deploy(
         if not click.confirm("Deploy to Elastic Beanstalk Cluster Mode?", default=True):
             raise click.Abort()
 
+    _persist_deployment(deployment)
     session = boto3.Session(region_name=region)
     ecr = session.client("ecr")
     eb = session.client("elasticbeanstalk")
     _ensure_ecr_repo(ecr, app)
-    _build_image_in_aws(
+    build_info = _build_image_in_aws(
         iam_client=session.client("iam"),
         codebuild_client=session.client("codebuild"),
         account_id=account_id,
@@ -590,11 +631,19 @@ def _execute_deploy(
         repo_url=source_url,
         image_uri=image_uri,
     )
+    deployment.update(build_info)
+    deployment["codebuild_project"] = build_info.get("project_name", codebuild_project)
+    _verify_ecr_image(ecr, image_uri)
+    deployment["status"] = "BUILD_SUCCEEDED"
+    _persist_deployment(deployment)
 
     infra = _provision_cluster_infrastructure(account_id, region)
     _ensure_eb_application(eb, app)
     version_label = _make_application_version_label(image_uri)
     _register_cluster_version(eb, app, version_label, image_uri, region)
+    deployment["version_label"] = version_label
+    deployment["status"] = "DEPLOYING"
+    _persist_deployment(deployment)
     created = _ensure_cluster_environment(
         eb, app, env, version_label, infra, env_vars, port
     )
@@ -611,6 +660,15 @@ def _execute_deploy(
         if wait
         else {"status": "Deploying", "health": "Pending", "url": None}
     )
+    deployment.update(result)
+    deployment["status"] = result["status"]
+    deployment["health"] = result["health"]
+    _persist_deployment(deployment)
+    if wait and result["status"] != "Ready":
+        raise RuntimeError(
+            f"Elastic Beanstalk environment '{env}' did not become ready "
+            f"(status: {result['status']}, health: {result['health']})."
+        )
     click.echo("")
     click.echo(f"Deployment: {result['status']} | Health: {result['health']}")
     if result.get("url"):
@@ -653,7 +711,7 @@ def deploy(source, app, environment_name, region, port, wait, env_file, extra_en
             extra_env=extra_env,
             is_interactive=not yes and sys.stdin.isatty(),
         )
-    except (ClientError, RuntimeError, TimeoutError) as exc:
+    except (BotoCoreError, ClientError, RuntimeError, TimeoutError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 

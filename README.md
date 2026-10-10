@@ -137,7 +137,38 @@ export GEMINI_API_KEY="your-key"
 ebkit init
 ```
 
-The wizard scans the project and can generate files such as `Dockerfile`, `.dockerignore`, `Procfile`, `.ebignore`, and `.env.example`. Review the generated files, commit and push the application (including its root Dockerfile) to a public GitHub repository, then deploy that URL with `ebkit deploy`.
+The wizard scans a local project or a public GitHub repository and generates or validates the deployment files, including one root-level `Dockerfile`. For a GitHub source, use:
+
+```powershell
+ebkit init --repo https://github.com/owner/project
+```
+
+EBKit clones into a folder named `project` in the current directory and retains that clone after init completes. If that folder already exists, init stops without overwriting it. Multi-tier projects are scanned and EBKit asks Docker AI (Gordon) to generate one root-level Dockerfile; if Gordon is unavailable or returns an invalid result, Gemini is used as a fallback. Gemini receives scan metadata and manifest paths, not source or manifest contents; `.env` values are not sent. Generation is best-effort: inspect the Dockerfile, verify it builds and serves every required tier, and run the generated app locally before deploying. EBKit's static validation cannot prove that arbitrary services work together at runtime.
+
+Compose databases, Redis, and other detected stateful dependencies are not bundled into the application container, and `ebkit init` does not provision managed services. Init reports these services, adds detected connection-variable names (never values) to `.env.example`, and creates or safely updates a local `.env` with blank missing settings. It also ensures `.env` is ignored by Git and prints a ready-to-edit `ebkit deploy ... --env-file .env` command. Existing `.env` values are preserved and never printed. Provision the required managed database/cache/broker separately, configure its network access, and fill in the connection values locally before deploying. Alternatively, pass individual values with repeated `--env KEY=VALUE` options. Never commit the real `.env` file. Then commit and push the application and root Dockerfile to GitHub before running the printed deploy command.
+
+## Inspect and manage deployments
+
+EBKit uses the current AWS CLI/Boto3 credentials and saved AWS region. `--app`, `--environment`, and `--region` can be supplied to select an environment; otherwise, EBKit uses its saved configuration or most recent deployment metadata.
+
+```powershell
+ebkit status --app my-app --environment my-app-cluster
+ebkit envlist --region us-east-2
+ebkit logs --app my-app --environment my-app-cluster --source all --lines 100
+ebkit diagnose --app my-app --environment my-app-cluster
+```
+
+`status` and `envlist` query Elastic Beanstalk for current environment status, health, URL, and version. `logs` retrieves CodeBuild logs and Elastic Beanstalk events. `diagnose` provides deterministic rule-based recommendations; pass `--gemini` to send sanitized event/build-log context to Gemini for additional advice. Gemini retries are bounded (at most three retries). Diagnosis is advisory and does not edit source code or AWS resources.
+
+Deployment metadata is stored locally at `~/.ebkit/deployments.json` (or the path in `EBKIT_STATE_FILE`). It contains deployment identifiers and public source metadata, not environment-variable values or AWS credentials.
+
+To terminate a deployment environment:
+
+```powershell
+ebkit destroy --app my-app --environment my-app-cluster
+```
+
+`destroy` requires typing the exact environment name. It terminates only that Elastic Beanstalk environment. It intentionally retains ECR repositories, CodeBuild projects, IAM roles, Elastic Beanstalk applications, and databases, which may be shared or persistent.
 
 ## Troubleshooting
 

@@ -29,6 +29,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 # pyrefly: ignore [missing-import]
 import click
@@ -103,6 +104,127 @@ def _safe_write(
     return True, status
 
 
+def _prepare_stateful_service_env(
+    repo_path: Path,
+    environment_variables: list[str],
+    port: int,
+) -> None:
+    """Create blank, gitignored connection settings without replacing local secrets."""
+    gitignore = repo_path / ".gitignore"
+    try:
+        gitignore_content = (
+            gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+        )
+        ignored_entries = {
+            line.strip().lstrip("/") for line in gitignore_content.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        if ".env" not in ignored_entries:
+            separator = "" if not gitignore_content or gitignore_content.endswith("\n") else "\n"
+            gitignore.write_text(
+                f"{gitignore_content}{separator}.env\n",
+                encoding="utf-8",
+            )
+
+        env_file = repo_path / ".env"
+        if env_file.exists():
+            content = env_file.read_text(encoding="utf-8")
+        else:
+            content = (
+                "# Local deployment settings. Fill in external service connection values.\n"
+            )
+        existing_keys = {
+            line.partition("=")[0].strip()
+            for line in content.splitlines()
+            if "=" in line and not line.lstrip().startswith("#")
+        }
+        missing_settings = [
+            f"{key}=" for key in sorted(set(environment_variables) - existing_keys)
+        ]
+        if "PORT" not in existing_keys:
+            missing_settings.append(f"PORT={port}")
+        if missing_settings:
+            separator = "" if not content or content.endswith("\n") else "\n"
+            appended_settings = "\n".join(missing_settings)
+            content = f"{content}{separator}{appended_settings}\n"
+        env_file.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        raise click.ClickException(
+            f"Could not safely prepare .env/.gitignore: {exc}"
+        ) from exc
+
+
+def _stateful_service_env_keys(scan: ScanResult) -> set[str]:
+    detected = set(scan.detected_env_vars)
+    required: set[str] = set()
+    for service in scan.stateful_services:
+        name = service.lower()
+        if any(hint in name for hint in ("redis", "valkey", "keydb")):
+            candidates = {key for key in detected if "REDIS" in key or "VALKEY" in key}
+            required.update(candidates or {"REDIS_URL"})
+        elif any(
+            hint in name
+            for hint in (
+                "db", "database", "postgres", "mysql", "maria", "mongo",
+                "couchbase", "cassandra",
+            )
+        ):
+            candidates = {
+                key for key in detected
+                if any(hint in key for hint in ("DATABASE", "POSTGRES", "MYSQL", "MONGO"))
+            }
+            required.update(candidates or {"DATABASE_URL"})
+        elif any(hint in name for hint in ("rabbit", "kafka", "broker")):
+            candidates = {
+                key for key in detected
+                if any(hint in key for hint in ("RABBIT", "KAFKA", "BROKER"))
+            }
+            required.update(candidates or {f"{service.upper().replace('-', '_')}_URL"})
+        else:
+            candidates = {
+                key for key in detected
+                if service.upper().replace("-", "_") in key
+            }
+            required.update(
+                candidates or {f"{service.upper().replace('-', '_')}_URL"}
+            )
+    return required
+
+
+def _print_stateful_service_deploy_guidance(
+    repo_path: Path,
+    repo_label: str,
+    port: int,
+) -> None:
+    source = repo_label
+    valid_url, _ = validate_github_url(source)
+    if not valid_url:
+        source = "https://github.com/OWNER/REPOSITORY.git"
+        app_name = repo_path.name.lower().replace("_", "-")
+    else:
+        repository_name = urlsplit(source).path.rstrip("/").rsplit("/", 1)[-1]
+        if repository_name.lower().endswith(".git"):
+            repository_name = repository_name[:-4]
+        app_name = repository_name.lower().replace("_", "-")
+    click.echo(
+        "\n⚠️ Compose stateful services are not included in the application container "
+        "and EBKit does not provision managed services."
+    )
+    click.echo(
+        "Provision the required database/cache/broker separately, configure network "
+        "access, then fill in the matching connection values in the gitignored .env."
+    )
+    click.echo(
+        "Blank connection settings were added where none were detected; existing "
+        ".env values were preserved."
+    )
+    click.echo(
+        "After pushing the root Dockerfile to GitHub, deploy with:\n"
+        f"  ebkit deploy {source} --app {app_name} "
+        f"--environment {app_name}-cluster --port {port} --env-file .env"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Display helper: EBReady Deployment Plan (canonical format preserved)
 # ---------------------------------------------------------------------------
@@ -167,7 +289,7 @@ def _print_ebready_plan(
 def _prompt_project_source() -> tuple[Path, Optional[str], str]:
     """
     Prompt user for project source.
-    Returns (repo_path, tmp_clone_dir, repo_label).
+    Returns (repo_path, cleanup_path, repo_label); GitHub clones are retained.
     """
     click.echo("🚀 Welcome to EBReady\n")
     click.echo("Where is your project?\n")
@@ -190,12 +312,8 @@ def _prompt_project_source() -> tuple[Path, Optional[str], str]:
             click.echo(f"\n❌ Invalid GitHub repository URL: {err_msg}", err=True)
             sys.exit(1)
 
-        try:
-            tmp_path = safe_clone_repo(raw_url)
-            return tmp_path, str(tmp_path), raw_url
-        except Exception as exc:
-            click.echo(f"\n❌ Failed to obtain GitHub repository: {exc}", err=True)
-            sys.exit(1)
+        repo_path = _clone_repo_to_local_folder(raw_url)
+        return repo_path, None, raw_url
 
     if choice == "3":
         click.echo("Local project path:")
@@ -211,6 +329,34 @@ def _prompt_project_source() -> tuple[Path, Optional[str], str]:
 
     click.echo(f"\n❌ Invalid selection: '{choice}'. Please select 1, 2, or 3.", err=True)
     sys.exit(1)
+
+
+def _clone_repo_to_local_folder(url: str) -> Path:
+    """Clone a GitHub repository into a new folder under the current directory."""
+    repo_name = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+    if repo_name.lower().endswith(".git"):
+        repo_name = repo_name[:-4]
+    if not repo_name or repo_name in {".", ".."}:
+        raise click.ClickException("Could not determine a local folder name from the GitHub URL.")
+
+    destination = Path.cwd() / repo_name
+    try:
+        destination.mkdir()
+    except FileExistsError:
+        raise click.ClickException(
+            f"Cannot clone repository because '{destination}' already exists. "
+            "Move or rename that folder, then run `ebkit init` again."
+        ) from None
+    except OSError as exc:
+        raise click.ClickException(f"Could not create repository folder '{destination}': {exc}") from exc
+
+    try:
+        click.echo(f"Cloning repository into {destination}...")
+        safe_clone_repo(url, dest_dir=destination)
+    except Exception as exc:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise click.ClickException(f"Failed to clone GitHub repository: {exc}") from exc
+    return destination
 
 
 def _check_gemini_key() -> None:
@@ -379,9 +525,7 @@ def init_command(
             if not is_valid:
                 click.echo(f"\n❌ Invalid GitHub repository URL: {err_msg}", err=True)
                 sys.exit(1)
-            tmp_p = safe_clone_repo(repo)
-            tmp_clone_dir = str(tmp_p)
-            repo_path = tmp_p
+            repo_path = _clone_repo_to_local_folder(repo)
             repo_label = repo
         else:
             repo_path = Path(path).resolve()
@@ -407,9 +551,7 @@ def init_command(
             if not is_valid:
                 click.echo(f"\n❌ Invalid GitHub repository URL: {err_msg}", err=True)
                 sys.exit(1)
-            tmp_p = safe_clone_repo(repo)
-            tmp_clone_dir = str(tmp_p)
-            repo_path = tmp_p
+            repo_path = _clone_repo_to_local_folder(repo)
             repo_label = repo
         elif path:
             repo_path = Path(path).resolve()
@@ -491,6 +633,16 @@ def init_command(
             for s in scan.services:
                 click.echo(f"  ✓ {s}")
         shown_details += 1
+    if scan.architecture == "MULTI_TIER":
+        if scan.stateful_services:
+            click.echo(
+                "✓ Compose stateful services detected: "
+                + ", ".join(scan.stateful_services)
+            )
+        click.echo(
+            "\n⚠️ Multi-tier project detected. EBKit will ask AI to generate and validate "
+            "one root-level Dockerfile for its application services."
+        )
     if scan.existing_dockerfile:
         click.echo("✓ Dockerfile detected")
         shown_details += 1
@@ -530,7 +682,33 @@ def init_command(
     click.echo(f"\n🤖 Running {ai_label} analysis...\n")
     try:
         ai = get_analyzer(prefer=chosen_analyzer)
+        if scan.stateful_services:
+            scan.detected_env_vars = sorted(
+                set(scan.detected_env_vars) | _stateful_service_env_keys(scan)
+            )
         config = ai.analyze(scan)
+        if scan.architecture == "MULTI_TIER":
+            aws_credential_keys = {
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_SESSION_TOKEN",
+            }
+            config.environment_variables = sorted(
+                (set(config.environment_variables) | set(scan.detected_env_vars))
+                - aws_credential_keys
+            )
+            config.cluster_environment_config.environment_variables = list(
+                config.environment_variables
+            )
+            env_example = config.get_artifact_plan().artifacts.get("env_example")
+            if env_example:
+                env_example.required = True
+                env_example.optional = False
+            if scan.detected_env_vars:
+                click.echo(
+                    "✓ External service/application variable names added to .env.example "
+                    "(values remain blank)."
+                )
         # Ensure resolved project port is strictly respected
         if config.port != resolved_port:
             config.port = resolved_port
@@ -582,13 +760,23 @@ def init_command(
 
     # Docker AI (Gordon) Dockerfile Generation
     docker_ai = DockerAIService()
-    if docker_ai.is_available():
-        click.echo("\n🤖 Docker AI (Gordon) generating Dockerfile...\n")
+    if docker_ai.is_available() or scan.architecture == "MULTI_TIER":
+        click.echo("\n🤖 AI generating the root Dockerfile...\n")
         gordon_df, gen_msg = docker_ai.generate_dockerfile(config, scan, working_dir=repo_path)
         if gordon_df:
             kit.files["Dockerfile"] = gordon_df
-            click.echo("✓ Dockerfile generated by Docker AI (Gordon)")
+            click.echo(f"✓ Root Dockerfile generated: {gen_msg}")
         else:
+            if scan.architecture == "MULTI_TIER":
+                click.echo(
+                    f"\n❌ Could not generate a complete multi-tier Dockerfile: {gen_msg}\n"
+                    "No generated Dockerfile was written. Review the project services "
+                    "and try again.",
+                    err=True,
+                )
+                if tmp_clone_dir:
+                    shutil.rmtree(tmp_clone_dir, ignore_errors=True)
+                sys.exit(1)
             click.echo(f"⚠️ Docker AI generation notice: {gen_msg} (using template)")
     else:
         click.echo("\n⚠️ Docker AI (Gordon) is unavailable. Using template generation.")
@@ -974,6 +1162,18 @@ def init_command(
         if tmp_clone_dir:
             shutil.rmtree(tmp_clone_dir, ignore_errors=True)
         sys.exit(1)
+
+    if scan.stateful_services:
+        _prepare_stateful_service_env(
+            repo_path,
+            config.environment_variables,
+            resolved_port,
+        )
+        _print_stateful_service_deploy_guidance(
+            repo_path,
+            repo_label,
+            resolved_port,
+        )
 
     # ── Cleanup temp clone ─────────────────────────────────────────────────
     if tmp_clone_dir:

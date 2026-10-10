@@ -46,6 +46,7 @@ class ScanResult:
     # Architecture & services
     architecture: str = "SINGLE_TIER"       # "SINGLE_TIER", "MULTI_TIER", "UNKNOWN"
     services: list[str] = field(default_factory=list)
+    stateful_services: list[str] = field(default_factory=list)
 
     # Existing deployment artefacts (True = already present)
     existing_dockerfile: bool = False
@@ -79,6 +80,7 @@ class ScanResult:
             "port_conflict_details": self.port_conflict_details,
             "architecture": self.architecture,
             "services": self.services,
+            "stateful_services": self.stateful_services,
             "existing_dockerfile": self.existing_dockerfile,
             "existing_docker_compose": self.existing_docker_compose,
             "docker_compose_file": self.docker_compose_file,
@@ -105,6 +107,8 @@ _PORT_PATTERNS = [
     re.compile(r"\.listen\s*\(\s*(\d{2,5})"),
     # PORT env variable default in Python code
     re.compile(r'getenv\s*\(\s*["\']PORT["\']\s*,\s*["\'](\d{2,5})["\']'),
+    # Go net.Listen / net/http server port
+    re.compile(r'Listen(?:AndServe)?\s*\(\s*["\']:(\d{2,5})["\']'),
     # process.env.PORT || XXXX
     re.compile(r"process\.env\.PORT\s*\|\|\s*(\d{2,5})"),
     # port=XXXX keyword arg
@@ -313,6 +317,7 @@ class ProjectScanner:
         self._detect_architecture(result)
         self._detect_language(result)
         self._detect_env_files(result)
+        self._detect_integrated_go_frontend_port(result)
         return result
 
     # ------------------------------------------------------------------
@@ -336,6 +341,9 @@ class ProjectScanner:
                 result.docker_compose_file = compose_file
                 compose_found = True
                 compose_text = self._read_safe(compose_file) or ""
+                result.stateful_services = self._detect_stateful_compose_services(
+                    compose_text
+                )
                 # Parse service names from compose text
                 # Simple YAML service detection
                 in_services_block = False
@@ -392,6 +400,87 @@ class ProjectScanner:
             result.architecture = "SINGLE_TIER"
             result.services = []
 
+    def _detect_integrated_go_frontend_port(self, result: ScanResult) -> None:
+        """Prefer the Go server's listener when it serves the built frontend itself."""
+        frontend_manifest = self.repo_path / "frontend" / "package.json"
+        if not frontend_manifest.is_file() or not result.entrypoint:
+            return
+
+        source = self._read_safe(result.entrypoint) or ""
+        if not all(
+            marker in source
+            for marker in ("FRONTEND_DIR", "serveFrontend", "NoRoute")
+        ):
+            return
+
+        port_match = re.search(
+            r'''env\s*\(\s*["']PORT["']\s*,\s*["'](\d{2,5})["']\s*\)''',
+            source,
+        )
+        if not port_match:
+            return
+        port = int(port_match.group(1))
+        if 1 <= port <= 65535:
+            result.detected_port = port
+            result.notes.append(
+                f"Application port {port} detected from the Go server that serves the built frontend."
+            )
+
+    @staticmethod
+    def _detect_stateful_compose_services(compose_text: str) -> list[str]:
+        stateful_hints = (
+            "postgres",
+            "postgresql",
+            "mysql",
+            "mariadb",
+            "mongo",
+            "mongodb",
+            "redis",
+            "valkey",
+            "keydb",
+            "memcached",
+            "couchbase",
+            "cassandra",
+            "rabbitmq",
+            "kafka",
+            "zookeeper",
+            "database",
+            "datastore",
+            "cache",
+            "broker",
+        )
+        found: list[str] = []
+        current_service: Optional[str] = None
+        current_image = ""
+        in_services = False
+
+        def record_service() -> None:
+            if current_service and any(
+                hint in f"{current_service} {current_image}".lower()
+                for hint in stateful_hints
+            ):
+                found.append(current_service)
+
+        for line in compose_text.splitlines():
+            if line.strip() == "services:":
+                in_services = True
+                continue
+            if not in_services:
+                continue
+            if line.strip() and not line.startswith((" ", "\t")):
+                break
+            service_match = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+            if service_match:
+                record_service()
+                current_service = service_match.group(1)
+                current_image = ""
+                continue
+            image_match = re.match(r"^\s+image:\s*[\"']?([^\"'\s]+)", line)
+            if image_match:
+                current_image = image_match.group(1)
+        record_service()
+        return list(dict.fromkeys(found))
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -406,6 +495,87 @@ class ProjectScanner:
     def _exists(self, *parts: str) -> bool:
         return (self.repo_path / Path(*parts)).exists()
 
+    def _detect_compose_application_port(self, compose_text: str) -> Optional[int]:
+        """Prefer the public application service port over database/cache ports."""
+        service_blocks: dict[str, list[str]] = {}
+        current_service: Optional[str] = None
+        in_services = False
+        for line in compose_text.splitlines():
+            if line.strip() == "services:":
+                in_services = True
+                continue
+            if not in_services:
+                continue
+            indent = len(line) - len(line.lstrip())
+            if line.strip() and indent == 0:
+                break
+            service_match = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+            if service_match:
+                current_service = service_match.group(1).lower()
+                service_blocks.setdefault(current_service, [])
+            elif current_service:
+                service_blocks[current_service].append(line)
+
+        stateful_hints = (
+            "postgres",
+            "mysql",
+            "mariadb",
+            "mongo",
+            "redis",
+            "memcached",
+            "database",
+            "datastore",
+            "cache",
+            "broker",
+            "rabbitmq",
+            "kafka",
+        )
+        priority_hints = (
+            ("frontend", "web", "client", "ui"),
+            ("backend", "api", "server"),
+        )
+        services = list(service_blocks.items())
+        services.sort(
+            key=lambda item: next(
+                (
+                    rank
+                    for rank, names in enumerate(priority_hints)
+                    if any(hint in item[0] for hint in names)
+                ),
+                2,
+            )
+        )
+
+        for service_name, lines in services:
+            if any(hint in service_name for hint in stateful_hints):
+                continue
+            ports: list[int] = []
+            in_ports = False
+            ports_indent = 0
+            for line in lines:
+                stripped = line.strip()
+                indent = len(line) - len(line.lstrip())
+                if re.match(r"(?:ports|expose):\s*(?:#.*)?$", stripped):
+                    in_ports = True
+                    ports_indent = indent
+                    continue
+                if in_ports and stripped and indent <= ports_indent:
+                    in_ports = False
+                if not in_ports:
+                    continue
+                if stripped.startswith("-"):
+                    value = stripped[1:].strip().strip("\"'")
+                    target = value.rsplit(":", 1)[-1].split("/", 1)[0]
+                    if target.isdigit() and 1 <= int(target) <= 65535:
+                        ports.append(int(target))
+                else:
+                    target_match = re.match(r"target:\s*(\d{1,5})\b", stripped)
+                    if target_match and 1 <= int(target_match.group(1)) <= 65535:
+                        ports.append(int(target_match.group(1)))
+            if ports:
+                return ports[0]
+        return None
+
     # ------------------------------------------------------------------
     # Language detection
     # ------------------------------------------------------------------
@@ -414,6 +584,8 @@ class ProjectScanner:
         if self._detect_python(result):
             return
         if self._detect_node(result):
+            return
+        if self._detect_go(result):
             return
         # Multi-tier: look into service subdirectories for language markers.
         # Use the dominant (backend) service directory.
@@ -459,6 +631,26 @@ class ProjectScanner:
                             result.detected_port = sub_result.detected_port
                         result.notes.append(
                             f"Language/framework detected from service subdir: {subdir}/"
+                        )
+                        return
+                    elif sub_scanner._detect_go(sub_result):
+                        result.language = sub_result.language
+                        result.framework = sub_result.framework
+                        result.runtime_version = sub_result.runtime_version
+                        result.package_manager = sub_result.package_manager
+                        result.dependency_files = [
+                            f"{subdir}/{f}" for f in sub_result.dependency_files
+                        ]
+                        result.entrypoint = (
+                            f"{subdir}/{sub_result.entrypoint}"
+                            if sub_result.entrypoint
+                            else None
+                        )
+                        result.detected_start_command = f"go run ./{subdir}"
+                        if not result.detected_port and sub_result.detected_port:
+                            result.detected_port = sub_result.detected_port
+                        result.notes.append(
+                            f"Language/runtime detected from service subdir: {subdir}/"
                         )
                         return
         result.notes.append("Could not determine project language from known manifest files.")
@@ -542,6 +734,40 @@ class ProjectScanner:
             if port:
                 result.detected_port = port
 
+        return True
+
+    def _detect_go(self, result: ScanResult) -> bool:
+        go_mod = self._read_safe("go.mod")
+        go_files = sorted(self.repo_path.glob("*.go"))
+        if not go_mod and not go_files:
+            return False
+
+        result.language = "go"
+        result.package_manager = "unknown"
+        if go_mod:
+            result.dependency_files.append("go.mod")
+        if self._exists("go.sum"):
+            result.dependency_files.append("go.sum")
+        if go_mod:
+            version_match = re.search(r"(?m)^\s*go\s+(\d+(?:\.\d+)*)", go_mod)
+            if version_match:
+                result.runtime_version = version_match.group(1)
+
+        entrypoints = (
+            "main.go",
+            "cmd/main.go",
+            "cmd/server/main.go",
+            "cmd/api/main.go",
+        )
+        for entrypoint in entrypoints:
+            if self._exists(entrypoint):
+                result.entrypoint = entrypoint
+                source = self._read_safe(entrypoint) or ""
+                port = _extract_port(source)
+                if port and not result.detected_port:
+                    result.detected_port = port
+                break
+        result.detected_start_command = "go run ."
         return True
 
     def _detect_node(self, result: ScanResult) -> bool:
@@ -700,8 +926,19 @@ class ProjectScanner:
             for compose_file in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
                 if self._exists(compose_file):
                     compose_text = self._read_safe(compose_file) or ""
+                    application_port = self._detect_compose_application_port(compose_text)
                     compose_ports = extract_docker_compose_ports(compose_text)
-                    if compose_ports:
+                    tier_dirs_exist = any(
+                        (self.repo_path / name).is_dir()
+                        for name in ("frontend", "backend", "client", "server", "api", "web")
+                    )
+                    if application_port:
+                        result.detected_port = application_port
+                        result.notes.append(
+                            f"Application port {application_port} detected from {compose_file}."
+                        )
+                        break
+                    if compose_ports and len(compose_ports) == 1 and not tier_dirs_exist:
                         result.detected_port = compose_ports[0]
                         result.notes.append(f"Application port {compose_ports[0]} detected from {compose_file}.")
                         break
@@ -749,8 +986,13 @@ class ProjectScanner:
         keys_found: set[str] = set()
 
         for pattern in env_patterns:
-            for p in self.repo_path.glob(pattern):
+            for p in self.repo_path.rglob(pattern):
                 if p.is_file():
+                    if any(
+                        part in {".git", "node_modules", ".venv", "venv", "__pycache__"}
+                        for part in p.relative_to(self.repo_path).parts
+                    ):
+                        continue
                     env_found.append(p.name)
                     # Safely read variable keys ONLY — never values
                     try:
@@ -787,18 +1029,32 @@ class ProjectScanner:
             re.compile(r'process\.env\.([A-Za-z0-9_]+)'),
             re.compile(r'process\.env\[\s*["\']([A-Za-z0-9_]+)["\']'),
         ]
+        go_patterns = [
+            re.compile(r'os\.(?:Getenv|LookupEnv)\(\s*"([A-Za-z_][A-Za-z0-9_]*)"'),
+            re.compile(r'\benv\(\s*"([A-Za-z_][A-Za-z0-9_]*)"'),
+        ]
+        compose_patterns = [
+            "docker-compose.yml",
+            "docker-compose.yaml",
+            "compose.yml",
+            "compose.yaml",
+        ]
         ignore_dirs = {".git", ".venv", "venv", "__pycache__", "node_modules", ".pytest_cache"}
         for p in self.repo_path.rglob("*"):
             if not p.is_file():
                 continue
             if any(part in ignore_dirs for part in p.parts):
                 continue
-            if p.suffix in (".py",):
+            if p.suffix in (".py", ".go"):
                 try:
                     text = p.read_text(encoding="utf-8", errors="replace")
                     for pat in py_patterns:
                         for m in pat.finditer(text):
                             keys.add(m.group(1))
+                    if p.suffix == ".go":
+                        for pat in go_patterns:
+                            for m in pat.finditer(text):
+                                keys.add(m.group(1))
                 except Exception:
                     pass
             elif p.suffix in (".js", ".ts", ".mjs"):
@@ -809,6 +1065,35 @@ class ProjectScanner:
                             keys.add(m.group(1))
                 except Exception:
                     pass
+        for compose_name in compose_patterns:
+            text = self._read_safe(compose_name) or ""
+            keys.update(
+                match.group(1)
+                for match in re.finditer(
+                    r"\$\{([A-Za-z_][A-Za-z0-9_]*)"
+                    r"(?:[:-][^}]*)?\}",
+                    text,
+                )
+            )
+            in_environment = False
+            environment_indent = 0
+            for line in text.splitlines():
+                stripped = line.strip()
+                indent = len(line) - len(line.lstrip())
+                if re.match(r"environment:\s*(?:#.*)?$", stripped):
+                    in_environment = True
+                    environment_indent = indent
+                    continue
+                if in_environment and stripped and indent <= environment_indent:
+                    in_environment = False
+                if not in_environment:
+                    continue
+                variable_match = re.match(
+                    r"(?:-\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*(?::|=|$)",
+                    stripped,
+                )
+                if variable_match:
+                    keys.add(variable_match.group(1))
         return keys
 
     # ------------------------------------------------------------------

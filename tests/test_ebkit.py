@@ -613,23 +613,53 @@ class TestSecretHandling:
 
 
 class TestGoldenFastAPIProject:
-    """End-to-end test simulating the actual EBReady FastAPI hello-world project."""
+    """End-to-end test simulating an EBReady FastAPI hello-world project."""
 
-    REPO_ROOT = Path(__file__).parent.parent  # ebready/
+    @pytest.fixture
+    def project(self, tmp_path: Path) -> Path:
+        app_dir = tmp_path / "app"
+        app_dir.mkdir()
+        (tmp_path / "requirements.txt").write_text(
+            "fastapi\nuvicorn\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "Procfile").write_text(
+            "web: python -m uvicorn app.main:app --host 0.0.0.0 --port 8080\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "Dockerfile").write_text(
+            "FROM python:3.12-slim\n"
+            "WORKDIR /app\n"
+            "COPY requirements.txt .\n"
+            "RUN pip install -r requirements.txt\n"
+            "COPY . .\n"
+            "EXPOSE 8080\n"
+            "CMD [\"python\", \"-m\", \"uvicorn\", \"app.main:app\", "
+            "\"--host\", \"0.0.0.0\", \"--port\", \"8080\"]\n",
+            encoding="utf-8",
+        )
+        (app_dir / "main.py").write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            '@app.get("/health")\n'
+            "def health(): return {\"status\": \"ok\"}\n",
+            encoding="utf-8",
+        )
+        return tmp_path
 
-    def test_scanner_detects_fastapi(self):
-        scan = ProjectScanner(self.REPO_ROOT).scan()
+    def test_scanner_detects_fastapi(self, project: Path):
+        scan = ProjectScanner(project).scan()
         assert scan.language == "python"
         assert scan.framework == "fastapi"
         assert "requirements.txt" in scan.dependency_files
         assert scan.entrypoint == "app/main.py"
 
-    def test_scanner_detects_existing_dockerfile(self):
-        scan = ProjectScanner(self.REPO_ROOT).scan()
+    def test_scanner_detects_existing_dockerfile(self, project: Path):
+        scan = ProjectScanner(project).scan()
         assert scan.existing_dockerfile is True
 
-    def test_full_pipeline_produces_valid_config(self):
-        scan = ProjectScanner(self.REPO_ROOT).scan()
+    def test_full_pipeline_produces_valid_config(self, project: Path):
+        scan = ProjectScanner(project).scan()
         config = _derive_config(scan)
         assert isinstance(config, DeploymentConfig)
         assert config.port == 8080
@@ -638,8 +668,8 @@ class TestGoldenFastAPIProject:
         assert config.health_check_path == "/health"
         assert config.dependency_file == "requirements.txt"
 
-    def test_full_pipeline_renders_all_files(self):
-        scan = ProjectScanner(self.REPO_ROOT).scan()
+    def test_full_pipeline_renders_all_files(self, project: Path):
+        scan = ProjectScanner(project).scan()
         config = _derive_config(scan)
         kit = DeploymentKitRenderer().render(config)
         assert "Dockerfile" in kit.files
@@ -649,16 +679,16 @@ class TestGoldenFastAPIProject:
         # Cluster Mode does NOT generate .ebextensions
         assert ".ebextensions/config.yml" not in kit.files
 
-    def test_generated_dockerfile_correct_image(self):
-        scan = ProjectScanner(self.REPO_ROOT).scan()
+    def test_generated_dockerfile_correct_image(self, project: Path):
+        scan = ProjectScanner(project).scan()
         config = _derive_config(scan)
         kit = DeploymentKitRenderer().render(config)
         dockerfile = kit.files["Dockerfile"]
         assert "python:" in dockerfile
         assert "slim" in dockerfile
 
-    def test_generated_procfile_correct(self):
-        scan = ProjectScanner(self.REPO_ROOT).scan()
+    def test_generated_procfile_correct(self, project: Path):
+        scan = ProjectScanner(project).scan()
         config = _derive_config(scan)
         kit = DeploymentKitRenderer().render(config)
         procfile = kit.files["Procfile"]
@@ -666,8 +696,8 @@ class TestGoldenFastAPIProject:
         assert any(l.startswith("web:") for l in process_lines)
         assert "uvicorn" in procfile
 
-    def test_scan_result_serialisable(self):
-        scan = ProjectScanner(self.REPO_ROOT).scan()
+    def test_scan_result_serialisable(self, project: Path):
+        scan = ProjectScanner(project).scan()
         d = scan.as_dict()
         # Should be JSON-serialisable
         json.dumps(d)

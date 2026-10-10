@@ -5,6 +5,7 @@ Comprehensive Test Matrix for EBReady Interactive CLI UX, Configuration, and Sec
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -82,7 +83,11 @@ class TestInteractiveCLI:
         user_input = "1\n1\n"
         with patch.object(GoogleAIAnalyzer, "__init__", return_value=None):
             with patch.object(GoogleAIAnalyzer, "analyze", return_value=dummy_config):
-                result = runner.invoke(init_command, ["--no-build"], input=user_input)
+                result = runner.invoke(
+                    init_command,
+                    ["--no-build", "--port", "8080"],
+                    input=user_input,
+                )
 
         assert result.exit_code == 0, f"Error: {result.output}"
         assert "🚀 Welcome to EBReady" in result.output
@@ -118,7 +123,11 @@ class TestInteractiveCLI:
         user_input = f"3\n{sample_project}\n1\n"
         with patch.object(GoogleAIAnalyzer, "__init__", return_value=None):
             with patch.object(GoogleAIAnalyzer, "analyze", return_value=dummy_config):
-                result = runner.invoke(init_command, ["--no-build"], input=user_input)
+                result = runner.invoke(
+                    init_command,
+                    ["--no-build", "--port", "8080"],
+                    input=user_input,
+                )
 
         assert result.exit_code == 0, f"Error: {result.output}"
         assert "Local project path:" in result.output
@@ -128,28 +137,153 @@ class TestInteractiveCLI:
         assert saved is not None
         assert saved.ai_provider == "gemini"
 
-    def test_interactive_github_repo(self, sample_project: Path, monkeypatch, tmp_path: Path):
-        """Option 2 prompts for GitHub repo, validates URL, clones safely, and cleans up."""
+    def test_init_generates_root_dockerfile_for_multitier_project(
+        self, sample_project: Path, monkeypatch, tmp_path: Path
+    ):
+        (sample_project / "frontend").mkdir()
+        (sample_project / "backend").mkdir()
+        (sample_project / "docker-compose.yml").write_text(
+            "services:\n"
+            "  postgres:\n"
+            "    image: postgres:16-alpine\n"
+            "    ports:\n"
+            '      - "5432:5432"\n'
+            "  backend:\n"
+            "    build: ./backend\n"
+            "    environment:\n"
+            "      DATABASE_URL: ${DATABASE_URL}\n"
+            "    ports:\n"
+            '      - "8081:8080"\n'
+            "  frontend:\n"
+            "    build: ./frontend\n"
+            "    ports:\n"
+            '      - "${FRONTEND_HOST_PORT:-8080}:4173"\n',
+            encoding="utf-8",
+        )
+        (sample_project / ".env").write_text(
+            "DATABASE_URL=postgres://existing-secret.example/app\n",
+            encoding="utf-8",
+        )
         config_file = tmp_path / "config"
         monkeypatch.setenv("EBKIT_CONFIG_FILE", str(config_file))
         monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        dummy_config = _create_sample_config()
+
+        def generate_multitier_dockerfile(config, _scan, **_kwargs):
+            return (
+                "FROM --platform=linux/amd64 python:3.12-slim\n"
+                "WORKDIR /app\n"
+                "COPY requirements.txt ./\n"
+                "RUN pip install --no-cache-dir -r requirements.txt\n"
+                "COPY . .\n"
+                f"EXPOSE {config.port}\n"
+                "USER nobody\n"
+                f'CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "{config.port}"]\n',
+                "generated for test",
+            )
+
+        with patch.object(GoogleAIAnalyzer, "__init__", return_value=None):
+            with patch.object(GoogleAIAnalyzer, "analyze", return_value=dummy_config):
+                with patch(
+                    "ebkit.commands.init.DockerAIService.is_available",
+                    return_value=False,
+                ):
+                    with patch(
+                        "ebkit.commands.init.DockerAIService.generate_dockerfile",
+                        side_effect=generate_multitier_dockerfile,
+                    ):
+                        result = CliRunner().invoke(
+                            init_command,
+                            [
+                                "--path",
+                                str(sample_project),
+                                "--analyzer",
+                                "gemini",
+                                "--yes",
+                                "--no-build",
+                            ],
+                        )
+
+        assert result.exit_code == 0, result.output
+        assert "AI to generate and validate one root-level Dockerfile" in result.output
+        assert "Compose stateful services detected: postgres" in result.output
+        assert "Provision the required database/cache/broker separately" in result.output
+        assert "Port 4173 detected" in result.output
+        assert "ebkit deploy https://github.com/OWNER/REPOSITORY.git" in result.output
+        assert "--env-file .env" in result.output
+        assert "existing-secret.example" not in result.output
+        dockerfile = (sample_project / "Dockerfile").read_text(encoding="utf-8")
+        assert "EXPOSE 4173" in dockerfile
+        env_example = (sample_project / ".env.example").read_text(encoding="utf-8")
+        assert "DATABASE_URL=" in env_example
+        assert "FRONTEND_HOST_PORT=" in env_example
+        assert "postgres://db:" not in env_example
+        env_file = (sample_project / ".env").read_text(encoding="utf-8")
+        assert "DATABASE_URL=postgres://existing-secret.example/app" in env_file
+        assert "FRONTEND_HOST_PORT=" in env_file
+        assert ".env" in (sample_project / ".gitignore").read_text(encoding="utf-8")
+
+    def test_interactive_github_repo(self, sample_project: Path, monkeypatch, tmp_path: Path):
+        """Option 2 retains the clone and writes a complete Dockerfile at its root."""
+        config_file = tmp_path / "config"
+        monkeypatch.setenv("EBKIT_CONFIG_FILE", str(config_file))
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        monkeypatch.chdir(tmp_path)
 
         dummy_config = _create_sample_config()
 
         runner = CliRunner()
         github_url = "https://github.com/test-owner/test-repo"
 
-        with patch("ebkit.commands.init.safe_clone_repo", return_value=sample_project) as mock_clone:
+        def clone_into_destination(url: str, *, dest_dir: Path) -> Path:
+            shutil.copytree(sample_project, dest_dir, dirs_exist_ok=True)
+            return dest_dir
+
+        with patch("ebkit.commands.init.safe_clone_repo", side_effect=clone_into_destination) as mock_clone:
             with patch.object(GoogleAIAnalyzer, "__init__", return_value=None):
                 with patch.object(GoogleAIAnalyzer, "analyze", return_value=dummy_config):
                     # Inputs: Option 2 -> github_url -> Gemini (1)
                     user_input = f"2\n{github_url}\n1\n"
-                    result = runner.invoke(init_command, ["--no-build"], input=user_input)
+                    result = runner.invoke(
+                        init_command,
+                        ["--no-build", "--port", "8080"],
+                        input=user_input,
+                    )
 
                     assert result.exit_code == 0, f"Error: {result.output}"
                     assert "GitHub repository URL:" in result.output
+                    assert f"Cloning repository into {tmp_path / 'test-repo'}" in result.output
                     assert "PROJECT READY FOR DEPLOYMENT" in result.output
-                    mock_clone.assert_called_once_with(github_url)
+                    mock_clone.assert_called_once_with(
+                        github_url,
+                        dest_dir=tmp_path / "test-repo",
+                    )
+                    dockerfile = tmp_path / "test-repo" / "Dockerfile"
+                    assert dockerfile.is_file()
+                    dockerfile_content = dockerfile.read_text(encoding="utf-8")
+                    assert "FROM " in dockerfile_content
+                    assert "EXPOSE 8080" in dockerfile_content
+                    assert "CMD " in dockerfile_content
+
+    def test_github_repo_clone_does_not_overwrite_existing_folder(self, monkeypatch, tmp_path: Path):
+        """GitHub init refuses to use an existing repository-named directory."""
+        monkeypatch.chdir(tmp_path)
+        destination = tmp_path / "test-repo"
+        destination.mkdir()
+        existing_file = destination / "keep.txt"
+        existing_file.write_text("keep", encoding="utf-8")
+
+        runner = CliRunner()
+        with patch("ebkit.commands.init.safe_clone_repo") as mock_clone:
+            result = runner.invoke(
+                init_command,
+                ["--repo", "https://github.com/test-owner/test-repo", "--yes"],
+            )
+
+        assert result.exit_code != 0
+        assert "already exists" in result.output
+        assert existing_file.read_text(encoding="utf-8") == "keep"
+        mock_clone.assert_not_called()
 
     def test_openai_coming_later(self, sample_project: Path, monkeypatch, tmp_path: Path):
         """Selecting Option 2 (OpenAI) outputs Coming Later and exits."""
@@ -262,7 +396,11 @@ class TestInteractiveCLI:
         # Option 1 (default) -> Option 1 (default Gemini)
         with patch.object(GoogleAIAnalyzer, "__init__", return_value=None):
             with patch.object(GoogleAIAnalyzer, "analyze", return_value=dummy_config):
-                result = runner.invoke(init_command, ["--no-build"], input="\n\n")
+                result = runner.invoke(
+                    init_command,
+                    ["--no-build", "--port", "8080"],
+                    input="\n\n",
+                )
                 assert result.exit_code == 0, f"Error: {result.output}"
                 assert "Project path: ." in result.output
 
@@ -288,7 +426,11 @@ class TestInteractiveCLI:
         with patch.object(GoogleAIAnalyzer, "__init__", return_value=None):
             with patch.object(GoogleAIAnalyzer, "analyze", return_value=dummy_config):
                 # Option 1 (current dir) -> Continue with saved config? "y"
-                result = runner.invoke(init_command, ["--no-build"], input="1\ny\n")
+                result = runner.invoke(
+                    init_command,
+                    ["--no-build", "--port", "8080"],
+                    input="1\ny\n",
+                )
                 assert result.exit_code == 0, f"Error: {result.output}"
                 assert "Using saved configuration:" in result.output
                 assert "AI Provider: Gemini" in result.output
@@ -317,7 +459,11 @@ class TestInteractiveCLI:
         user_input = "1\nn\n1\n"
         with patch.object(GoogleAIAnalyzer, "__init__", return_value=None):
             with patch.object(GoogleAIAnalyzer, "analyze", return_value=dummy_config):
-                result = runner.invoke(init_command, ["--no-build"], input=user_input)
+                result = runner.invoke(
+                    init_command,
+                    ["--no-build", "--port", "8080"],
+                    input=user_input,
+                )
 
         assert result.exit_code == 0, f"Error: {result.output}"
         updated_cfg = load_config(config_file)

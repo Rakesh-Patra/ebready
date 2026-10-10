@@ -252,7 +252,7 @@ class TestDockerAIRecoveryScenarios:
 
         assert result.exit_code == 0
         assert "Restored valid uvicorn start command in CMD." in result.output
-        assert "✓ Container health check passed" in result.output
+        assert "✓ Health check passed" in result.output
 
     def test_missing_dependency_recovery(self, sample_project: Path, sample_config: DeploymentConfig, monkeypatch):
         """Gordon diagnoses missing requirements.txt pip install and adds it."""
@@ -569,7 +569,7 @@ class TestDockerAIConstraintsAndSecurity:
                                             result = runner.invoke(
                                                 init_command,
                                                 ["--path", str(sample_project), "--analyzer", "gemini", "--build", "--scout"],
-                                                input="N\n",
+                                                input="N\nN\n",
                                             )
 
         assert result.exit_code == 0, f"Output:\n{result.output}"
@@ -603,7 +603,7 @@ class TestDockerAIConstraintsAndSecurity:
                             result = runner.invoke(
                                 init_command,
                                 ["--path", str(sample_project), "--analyzer", "gemini", "--build", "--no-scout"],
-                                input="N\n",
+                                input="N\nN\n",
                             )
 
         assert result.exit_code != 0
