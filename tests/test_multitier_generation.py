@@ -188,9 +188,127 @@ def test_gemini_multitier_dockerfile_generation_uses_redacted_manifests(
     assert "real-secret" not in request_content
     assert "compose-secret" not in request_content
     assert "POSTGRES_URL=postgres://db" not in request_content
+    assert "Observed serving contract" in request_content
+    assert "FRONTEND_DIR" in request_content
+    assert "Do not request file-access tools" in request_content
+    assert "NoRoute" not in request_content
 
 
-def test_integrated_go_frontend_dockerfile_guard_accepts_complete_image(
+def test_multitier_build_metadata_supports_python_and_node_without_exporting_scripts(tmp_path):
+    project = tmp_path / "mixed"
+    (project / "api").mkdir(parents=True)
+    (project / "web").mkdir()
+    (project / "api" / "requirements.txt").write_text("flask==3.1.0\n")
+    (project / "api" / "app.py").write_text("from flask import Flask\napp = Flask(__name__)\n")
+    (project / "web" / "package.json").write_text(json.dumps({
+        "scripts": {"build": "vite build --token=private-script-value"},
+        "dependencies": {"react": "18.3.1", "vite": "5.4.0"},
+    }))
+    (project / "web" / ".env").write_text("SECRET=private-env-value\n")
+    scan = ProjectScanner(project).scan()
+
+    context = DockerAIService._multitier_build_contract(scan, project)
+
+    assert '"language": "python"' in context
+    assert '"language": "node"' in context
+    assert '"build_directory": "api"' in context
+    assert '"build_directory": "web"' in context
+    assert '"package_script_names": [' in context
+    assert "private-script-value" not in context
+    assert "private-env-value" not in context
+    assert "golang:" not in context
+    assert "devboard" not in context
+
+
+@pytest.mark.parametrize(
+    ("manifest_copy", "source_copy"),
+    [
+        (
+            "COPY frontend/package.json frontend/package-lock.json ./",
+            "COPY frontend/ ./",
+        ),
+        (
+            "COPY ./frontend/package.json ./",
+            "COPY ./frontend ./",
+        ),
+        (
+            'COPY ["./frontend/package.json", "./frontend/package-lock.json", "./"]',
+            'COPY ["./frontend", "./"]',
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "frontend_env",
+    [
+        "ENV FRONTEND_DIR=/app/frontend",
+        'ENV FRONTEND_DIR="/app/frontend" PORT=8080',
+        "ENV FRONTEND_DIR=/app/frontend \\\n    PORT=8080",
+    ],
+)
+@pytest.mark.parametrize(
+    "asset_copy",
+    [
+        "COPY --from=frontend-build /src/frontend/dist /app/frontend",
+        'COPY --from=frontend-build "/src/frontend/dist" "/app/frontend/"',
+        'COPY --from=frontend-build ["/src/frontend/dist", "/app/frontend/"]',
+    ],
+)
+def test_integrated_go_frontend_dockerfile_guard_accepts_copy_syntax_variants(
+    tmp_path: Path,
+    manifest_copy: str,
+    source_copy: str,
+    frontend_env: str,
+    asset_copy: str,
+):
+    project = _multitier_project(tmp_path)
+    scan = ProjectScanner(project).scan()
+    config = DeploymentConfig.model_validate(
+        {
+            "language": "go",
+            "package_manager": "unknown",
+            "dependency_file": "backend/go.mod",
+            "entrypoint": "backend/main.go",
+            "port": scan.detected_port,
+            "start_command": "./devboard",
+            "health_check_path": "/health",
+            "platform": "linux/amd64",
+            "architecture": "amd64",
+            "container_strategy": "multi_stage",
+        }
+    )
+    dockerfile = (
+        "FROM node:22-alpine AS frontend-build\n"
+        "WORKDIR /src/frontend\n"
+        f"{manifest_copy}\n"
+        "RUN npm ci --legacy-peer-deps\n"
+        f"{source_copy}\n"
+        "RUN npm run build\n"
+        "FROM golang:1.22-alpine AS backend-build\n"
+        "WORKDIR /src/backend\n"
+        "COPY backend/go.mod backend/go.sum ./\n"
+        "RUN go mod download\n"
+        "COPY backend/ ./\n"
+        "RUN go test ./... && CGO_ENABLED=0 GOOS=linux go build -o /out/devboard .\n"
+        "FROM alpine:3.21\n"
+        "RUN apk add --no-cache ca-certificates && addgroup -S app "
+        "&& adduser -S -G app app\n"
+        "COPY --from=backend-build /out/devboard /usr/local/bin/devboard\n"
+        f"{asset_copy}\n"
+        f"{frontend_env}\n"
+        f"EXPOSE {config.port}\n"
+        "USER app\n"
+        'ENTRYPOINT ["/usr/local/bin/devboard"]\n'
+    )
+
+    assert DockerAIService._multitier_dockerfile_error(
+        dockerfile,
+        config,
+        scan,
+        project,
+    ) is None
+
+
+def test_integrated_go_frontend_dockerfile_guard_requires_source_before_build(
     tmp_path: Path,
 ):
     project = _multitier_project(tmp_path)
@@ -212,19 +330,16 @@ def test_integrated_go_frontend_dockerfile_guard_accepts_complete_image(
     dockerfile = (
         "FROM node:22-alpine AS frontend-build\n"
         "WORKDIR /src/frontend\n"
-        "COPY frontend/package.json frontend/package-lock.json ./\n"
-        "RUN npm ci --legacy-peer-deps\n"
-        "COPY frontend/ ./\n"
+        "COPY ./frontend/package.json ./\n"
+        "RUN npm ci\n"
         "RUN npm run build\n"
+        "COPY ./frontend ./\n"
         "FROM golang:1.22-alpine AS backend-build\n"
         "WORKDIR /src/backend\n"
-        "COPY backend/go.mod backend/go.sum ./\n"
-        "RUN go mod download\n"
         "COPY backend/ ./\n"
-        "RUN go test ./... && CGO_ENABLED=0 GOOS=linux go build -o /out/devboard .\n"
+        "RUN go build -o /out/devboard .\n"
         "FROM alpine:3.21\n"
-        "RUN apk add --no-cache ca-certificates && addgroup -S app "
-        "&& adduser -S -G app app\n"
+        "RUN addgroup -S app && adduser -S -G app app\n"
         "COPY --from=backend-build /out/devboard /usr/local/bin/devboard\n"
         "COPY --from=frontend-build /src/frontend/dist /app/frontend\n"
         "ENV FRONTEND_DIR=/app/frontend\n"
@@ -233,12 +348,34 @@ def test_integrated_go_frontend_dockerfile_guard_accepts_complete_image(
         'ENTRYPOINT ["/usr/local/bin/devboard"]\n'
     )
 
-    assert DockerAIService._multitier_dockerfile_error(
+    error = DockerAIService._multitier_dockerfile_error(
         dockerfile,
         config,
         scan,
         project,
-    ) is None
+    )
+
+    assert error == "Dockerfile does not copy the frontend source before building it."
+
+
+@pytest.mark.parametrize("install", [
+    "RUN npm ci --omit=dev",
+    "RUN npm install --production",
+    "ENV NODE_ENV=production\nRUN npm ci",
+])
+def test_frontend_build_rejects_omitted_build_dependencies(install):
+    config = DeploymentConfig.model_validate({
+        "language": "node", "package_manager": "npm", "port": 8080,
+        "start_command": "node server.js", "health_check_path": "/health",
+    })
+    dockerfile = (
+        "FROM node:22-alpine AS builder\nCOPY . .\n"
+        f"{install}\nRUN npm run build\nEXPOSE 8080\n"
+        'CMD ["node", "server.js"]\n'
+    )
+    assert DockerAIService._multitier_dockerfile_error(dockerfile, config) == (
+        "Frontend builder omits development dependencies required by its build."
+    )
 
 
 def test_multitier_dockerfile_validation_rejects_missing_start_command():

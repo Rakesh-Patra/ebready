@@ -13,7 +13,9 @@ from __future__ import annotations
 import logging
 import json
 import os
+import posixpath
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -23,7 +25,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-from ebkit.analyzer.scanner import ScanResult
+from ebkit.analyzer.scanner import ProjectScanner, ScanResult
 from ebkit.models.deployment_config import DeploymentConfig
 
 logger = logging.getLogger(__name__)
@@ -110,7 +112,7 @@ class DockerAIService:
         logger.info("Calling Docker AI (Gordon)...")
         proc = subprocess.run(
             cmd,
-            input="a\n",  # Confirm any tool permissions automatically
+            input="n\n",  # Generation/repair returns text; never authorize Gordon tool actions.
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -171,29 +173,30 @@ Requirements:
 - CMD or ENTRYPOINT must execute: {start_cmd}
 - Do NOT include or copy .env files or secret values.
 - Return the complete Dockerfile inside a ```dockerfile ... ``` code block.
+- Generate the response only; do not modify project files or run build commands.
 """
         if scan and scan.architecture == "MULTI_TIER":
-            prompt += f"""
-
-This is a multi-tier repository. Detected services: {", ".join(scan.services) or "unknown"}.
-Generate ONE root-context Dockerfile that builds and runs the required application
-tiers in a single container and exposes only the public application port {port}.
-Use the repository files in the working directory to determine each build command,
-runtime command, and any reverse-proxy/static-file wiring. Do not assume a backend
-serves frontend files unless its source supports that. If multiple long-running
-application processes are required, use a production-capable process manager and
-route requests correctly; a Dockerfile that starts only one tier is not acceptable.
-When the Go backend source serves frontend assets using FRONTEND_DIR, follow that
-contract: build frontend/ with its lockfile and package scripts, copy the built
-dist/ into the final image, set FRONTEND_DIR to that exact destination, build and
-run the Go server as the application process, and do not add nginx or a process
-manager. The deployment port must match the Go server listener, not a Compose host
-port used only for local development.
-Treat databases, Redis, and other stateful Compose services as external managed
-services: do not build, install, or start them in this container. Read their
-connection settings only from environment variables; never copy .env files or
-embed credentials. The final stage must run as a non-root user.
-"""
+            prompt = (
+                "Generate one root-context multi-stage Dockerfile for all application "
+                "services described below. Return only a ```dockerfile fenced code "
+                "block. Do not call tools, read files, modify files, or execute builds.\n"
+                f"Public application listener: 0.0.0.0:{port}.\n"
+                "Infer build and runtime commands from the service metadata. Run "
+                "compiled applications as compiled executables, rather than a "
+                "development command. Build frontend assets with their build dependencies "
+                "installed; never omit dev dependencies before a frontend build. "
+                "Keep databases and caches external and read connection settings "
+                "from runtime environment variables. Do not embed values or placeholders. "
+                "Use versioned base images compatible with each detected runtime, "
+                "defaulting to public Docker Hub official images. Existing image "
+                "names are hints, not requirements: do not require a specialty "
+                "registry unless the user configured one for deployment. "
+                "multi-stage builds, and a non-root final user. If services need separate "
+                "processes, provide production-capable process management and request routing; "
+                "if the backend serves frontend assets, use that existing capability. "
+                f"Expose only port {port}.\n"
+                + self._multitier_build_contract(scan, working_dir)
+            )
         try:
             raw_output = self.ask_gordon(prompt, working_dir=working_dir)
             dockerfile = self.extract_dockerfile(raw_output)
@@ -247,6 +250,54 @@ embed credentials. The final stage must run as a non-root user.
         if dockerfile:
             return dockerfile, message
         return None, f"{gordon_error} Gemini fallback failed: {message}"
+
+    @staticmethod
+    def _multitier_build_contract(
+        scan: ScanResult, working_dir: Optional[Path]
+    ) -> str:
+        """Supply service metadata for any detected stack, never manifest contents."""
+        if not working_dir:
+            return ""
+        manifest_paths = DockerAIService._multitier_project_context(working_dir).splitlines()
+        directories = sorted({
+            str(Path(path).parent) for path in manifest_paths
+            if Path(path).name not in {"Makefile", "Procfile"}
+        })
+        services = []
+        for relative_dir in directories:
+            directory = working_dir / relative_dir
+            service_scan = ProjectScanner(directory).scan()
+            metadata = service_scan.as_dict()
+            metadata["build_directory"] = Path(relative_dir).as_posix()
+            package_file = directory / "package.json"
+            if package_file.is_file():
+                try:
+                    package = json.loads(package_file.read_text(encoding="utf-8"))
+                    if isinstance(package, dict) and isinstance(package.get("scripts", {}), dict):
+                        metadata["package_script_names"] = sorted(package.get("scripts", {}))
+                        metadata["has_npm_lockfile"] = (directory / "package-lock.json").is_file()
+                except (OSError, ValueError, TypeError):
+                    pass
+            # Existing base-image choices are useful runtime evidence, not full recipes.
+            dockerfile = directory / "Dockerfile"
+            if dockerfile.is_file():
+                content = dockerfile.read_text(encoding="utf-8", errors="replace")
+                metadata["existing_base_images"] = re.findall(
+                    r"(?im)^\s*FROM\s+(?:--platform=\S+\s+)?([^\s]+)", content
+                )
+                if re.search(r"\bnpm\s+(?:ci|install)\b[^\n]*--legacy-peer-deps\b", content):
+                    metadata["npm_install_flags"] = ["--legacy-peer-deps"]
+            services.append(metadata)
+        context = "Detected service build metadata:\n" + json.dumps(services, indent=2)
+        if DockerAIService._uses_go_frontend_contract(scan, working_dir):
+            context += (
+                "\nObserved serving contract: the backend serves the frontend's built "
+                "dist/ assets and SPA routes using the FRONTEND_DIR environment variable. "
+                "It also serves /api/ and /health. Copy the frontend build output into "
+                "the final image and set FRONTEND_DIR to that exact destination in the "
+                "final stage; no separate frontend server is required."
+            )
+        return context + "\nDo not request file-access tools; use this detected metadata.\n"
 
     @staticmethod
     def _multitier_project_context(working_dir: Optional[Path]) -> str:
@@ -331,16 +382,23 @@ Requirements:
 - Build all application tiers needed for the user-facing application, then run
   them together in one container using a reliable process manager/reverse proxy
   when the architecture requires it. Do not silently omit a tier.
+- Frontend builders must install build/dev dependencies; do not use --omit=dev,
+  --production, or NODE_ENV=production before running the frontend build.
+- Run each build in its detected build_directory where its manifest lives.
+  Respect detected package-manager install flags and runtime versions.
 - The final container must expose and serve the application on 0.0.0.0:{config.port}.
 - Treat database, Redis, and other stateful services as external managed services.
   Do not run or bundle them in the container. Use environment variables for their
   endpoints and credentials; never invent values or copy .env files.
 - Do not embed secrets, fetch scripts from arbitrary URLs, or use unpinned
   :latest base images. Run as a non-root user.
+- Default to publicly pullable Docker Hub official base images for the detected
+  runtimes; existing image names are evidence, not a requirement to use a registry.
 - Return only one complete Dockerfile in a ```dockerfile code block. If the
   available evidence cannot produce a correct combined runtime, state that rather
   than returning a knowingly incomplete Dockerfile.
 """
+        prompt += cls._multitier_build_contract(scan, working_dir)
         payload = json.dumps(
             {
                 "contents": [{"parts": [{"text": prompt}]}],
@@ -407,6 +465,15 @@ Requirements:
             return "Generated Dockerfile does not copy application files from the repository."
         if not re.search(r"(?m)^\s*(?:CMD|ENTRYPOINT)\s+", dockerfile):
             return "Generated Dockerfile does not define a container startup command."
+        logical_lines = re.sub(r"\\\r?\n\s*", " ", dockerfile).splitlines()
+        stage_lines: list[str] = []
+        for line in logical_lines:
+            if re.match(r"(?i)^\s*FROM\s+", line):
+                stage_lines = []
+            stage_lines.append(line)
+            if re.search(r"(?i)^\s*RUN\s+.*\b(?:npm\s+run\s+build|pnpm\s+(?:run\s+)?build|yarn\s+(?:run\s+)?build)\b", line):
+                if re.search(r"(?i)--omit(?:=|\s+)dev\b|--production\b|NODE_ENV\s*=\s*[\"']?production\b", "\n".join(stage_lines)):
+                    return "Frontend builder omits development dependencies required by its build."
         exposed = {
             int(port)
             for port in re.findall(r"(?m)^\s*EXPOSE\s+(\d+)", dockerfile)
@@ -439,15 +506,87 @@ Requirements:
     @staticmethod
     def _go_frontend_dockerfile_error(dockerfile: str) -> Optional[str]:
         """Validate that Go-served frontend assets are actually built and shipped."""
-        lines = dockerfile.splitlines()
-        lowered = dockerfile.lower()
-        if not re.search(r"(?m)^\s*COPY\s+frontend/package\.json\b", dockerfile):
+        logical_lines = re.sub(r"\\\r?\n\s*", " ", dockerfile).splitlines()
+        lines = logical_lines
+        copy_instructions = DockerAIService._dockerfile_copy_sources(dockerfile)
+
+        def source_path(path: str) -> str:
+            return path.replace("\\", "/").removeprefix("./").rstrip("/")
+
+        def includes_frontend(path: str) -> bool:
+            normalized = source_path(path)
+            if normalized in {".", "frontend"}:
+                return True
+            return (
+                normalized.startswith("frontend/")
+                and re.fullmatch(
+                    r"frontend/package(?:\.json|-[^/]*|\*[^/]*)",
+                    normalized,
+                )
+                is None
+            )
+
+        def includes_package_manifest(path: str) -> bool:
+            normalized = source_path(path)
+            return (
+                normalized in {".", "frontend"}
+                or normalized.startswith("frontend/")
+                and re.fullmatch(r"frontend/package(?:\.json|\*\.json)", normalized)
+                is not None
+            )
+
+        install_line = next(
+            (
+                index
+                for index, line in enumerate(logical_lines)
+                if re.search(
+                    r"(?i)^\s*RUN\s+.*\b(?:npm|pnpm|yarn)\s+(?:ci|install)\b",
+                    line,
+                )
+            ),
+            len(logical_lines),
+        )
+        build_line = next(
+            (
+                index
+                for index, line in enumerate(logical_lines)
+                if re.search(
+                    r"(?i)^\s*RUN\s+.*\b(?:npm\s+run\s+build|"
+                    r"pnpm\s+(?:run\s+)?build|yarn\s+(?:run\s+)?build)\b",
+                    line,
+                )
+            ),
+            len(logical_lines),
+        )
+
+        if not any(
+            index < install_line
+            and any(includes_package_manifest(source) for source in sources)
+            for index, sources in copy_instructions
+        ):
             return "Dockerfile does not copy the frontend package manifest."
-        if not re.search(r"(?m)^\s*COPY\s+frontend/\s", dockerfile):
+        if not any(
+            index < build_line
+            and any(includes_frontend(source) for source in sources)
+            for index, sources in copy_instructions
+        ):
             return "Dockerfile does not copy the frontend source before building it."
-        if not re.search(r"(?im)^\s*RUN\s+.*\b(?:npm|pnpm|yarn)\s+(?:ci|install)\b", dockerfile):
+        if not any(
+            re.search(
+                r"(?i)^\s*RUN\s+.*\b(?:npm|pnpm|yarn)\s+(?:ci|install)\b",
+                line,
+            )
+            for line in logical_lines
+        ):
             return "Dockerfile does not install frontend dependencies."
-        if not re.search(r"(?im)^\s*RUN\s+.*\bnpm\s+run\s+build\b", dockerfile):
+        if not any(
+            re.search(
+                r"(?i)^\s*RUN\s+.*\b(?:npm\s+run\s+build|"
+                r"pnpm\s+(?:run\s+)?build|yarn\s+(?:run\s+)?build)\b",
+                line,
+            )
+            for line in logical_lines
+        ):
             return "Dockerfile does not build the frontend assets."
 
         final_from = max(
@@ -455,43 +594,91 @@ Requirements:
             default=-1,
         )
         frontend_copy = None
+        workdir = "/"
+        copied_destinations = []
         for line in lines[final_from + 1 :]:
-            match = re.match(
-                r"^\s*COPY\s+--from=\S+\s+\S*dist/?\s+(\S+)\s*$",
-                line,
-                re.IGNORECASE,
-            )
-            if match:
-                frontend_copy = match.group(1).rstrip("/")
-                break
-        if not frontend_copy:
+            match = re.match(r"(?i)^\s*(WORKDIR|COPY)\s+(.+)$", line)
+            if not match:
+                continue
+            try:
+                tokens = shlex.split(match.group(2))
+            except ValueError:
+                continue
+            if match.group(1).upper() == "WORKDIR":
+                if tokens:
+                    workdir = posixpath.normpath(posixpath.join(workdir, tokens[0]))
+                continue
+            if not any(token.startswith("--from=") for token in tokens):
+                continue
+            paths = [token.strip("[],") for token in tokens if not token.startswith("--")]
+            if len(paths) < 2:
+                continue
+            destination = posixpath.normpath(posixpath.join(workdir, paths[-1]))
+            copied_destinations.append(destination)
+            if any(posixpath.basename(posixpath.normpath(path)) == "dist" for path in paths[:-1]):
+                frontend_copy = destination
+        if frontend_copy is None:
             return "Dockerfile does not copy the built frontend dist/ into the final image."
-        frontend_dir = re.search(
-            r"(?im)^\s*ENV\s+FRONTEND_DIR(?:=|\s+)(\S+)\s*$",
-            dockerfile,
-        )
-        if not frontend_dir or frontend_dir.group(1).rstrip("/") != frontend_copy:
+        frontend_dir = None
+        for line in lines[final_from + 1 :]:
+            match = re.match(r"(?i)^\s*ENV\s+(.+)$", line)
+            if not match:
+                continue
+            try:
+                assignments = shlex.split(match.group(1))
+            except ValueError:
+                continue
+            if assignments and "=" not in assignments[0]:
+                if assignments[0] == "FRONTEND_DIR":
+                    frontend_dir = " ".join(assignments[1:])
+            else:
+                for assignment in assignments:
+                    key, separator, value = assignment.partition("=")
+                    if separator and key == "FRONTEND_DIR":
+                        frontend_dir = value
+        if frontend_dir is None or posixpath.normpath(frontend_dir) != frontend_copy:
             return (
                 "Dockerfile must set FRONTEND_DIR to the destination of the copied "
                 "frontend dist/ assets."
             )
 
-        if not re.search(r"(?im)^\s*RUN\s+.*\bgo\s+build\b", dockerfile):
+        if not re.search(r"(?im)^\s*RUN\s+.*\bgo\s+build\b", "\n".join(lines)):
             return "Dockerfile does not build the Go backend."
         startup = "\n".join(
             line for line in lines[final_from + 1 :]
             if re.match(r"(?i)^\s*(?:CMD|ENTRYPOINT)\s+", line)
         )
-        go_binary_copies = re.findall(
-            r"(?im)^\s*COPY\s+--from=\S+\s+\S+\s+(\S+)\s*$",
-            "\n".join(lines[final_from + 1 :]),
-        )
-        if not startup or not any(path in startup for path in go_binary_copies):
+        if not startup or not any(
+            path in startup or f"./{posixpath.basename(path)}" in startup
+            for path in copied_destinations if path != frontend_copy
+        ):
             return "Dockerfile startup command does not run the copied Go backend."
         final_stage = "\n".join(lines[final_from + 1 :])
         if not re.search(r"(?im)^\s*USER\s+(?!root\b|0\b)\S+", final_stage):
             return "Final Docker stage must run as a non-root user."
         return None
+
+    @staticmethod
+    def _dockerfile_copy_sources(dockerfile: str) -> list[tuple[int, list[str]]]:
+        """Return repository source paths from COPY instructions and their line numbers."""
+        logical_dockerfile = re.sub(r"\\\r?\n\s*", " ", dockerfile)
+        copies = []
+        for index, line in enumerate(logical_dockerfile.splitlines()):
+            match = re.match(r"^\s*COPY\s+(.+?)\s*$", line, re.IGNORECASE)
+            if not match:
+                continue
+            try:
+                tokens = shlex.split(match.group(1))
+            except ValueError:
+                continue
+            if any(token == "--from" or token.startswith("--from=") for token in tokens):
+                continue
+            tokens = [token for token in tokens if not token.startswith("--")]
+            if len(tokens) < 2:
+                continue
+            sources = [token.strip("[],") for token in tokens[:-1]]
+            copies.append((index, sources))
+        return copies
 
     def diagnose_and_repair(
         self,
