@@ -136,6 +136,8 @@ Ask your AWS administrator to authorize the deploy identity for the following op
 
 The IAM identity that runs EBKit is separate from the service roles used by CodeBuild and Elastic Beanstalk. The deploy identity needs permission to pass the service roles to AWS; AWS services then assume those roles using their trust policies. Do not solve an access-denied error by sharing credentials or granting unrestricted administrator access. Have an administrator review and approve a least-privilege policy for your account. If the roles already exist, the deploy identity still needs permission to read and use them, and to pass them where required.
 
+The initial IAM setup can be involved. If the list feels tedious and you are tempted to grant `AdministratorAccess` just to get past setup, do not use that as a shortcut: it grants broad access to your AWS account beyond what EBKit needs. Ask your AWS administrator to create or provide a dedicated deployment role with the permissions above instead.
+
 An earlier successful deployment may have used roles that were already present or an AWS identity with broader permissions. A later deployment can still fail if it needs a new role, such as the CodeBuild role for a different repository.
 
 ### Options
