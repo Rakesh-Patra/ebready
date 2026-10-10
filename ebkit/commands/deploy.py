@@ -242,7 +242,10 @@ def _provision_cluster_infrastructure(account_id: str, region: str) -> Dict:
 
 def _ensure_ecr_repo(ecr_client, repo_name: str) -> str:
     try:
-        ecr_client.create_repository(repositoryName=repo_name)
+        ecr_client.create_repository(repositoryName=repo_name, tags=[
+            {"Key": "ManagedBy", "Value": "EBKit"},
+            {"Key": "EBKitApplication", "Value": repo_name},
+        ])
         _ok(f"ECR repository '{repo_name}' created.")
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") != "RepositoryAlreadyExistsException":
@@ -383,12 +386,15 @@ def _build_image_in_aws(
         },
         "serviceRole": role_arn,
         "timeoutInMinutes": 60,
+        "tags": [{"key": "ManagedBy", "value": "EBKit"},
+                 {"key": "EBKitApplication", "value": app_name}],
     }
     try:
         codebuild_client.create_project(**project_args)
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") != "ResourceAlreadyExistsException":
             raise
+        project_args.pop("tags", None)  # Do not claim ownership of a pre-existing project.
         codebuild_client.update_project(**project_args)
 
     result = codebuild_client.start_build(
@@ -450,6 +456,30 @@ def _build_cluster_option_settings(
         "Value": json.dumps(environment),
     })
     return options
+
+
+def _existing_environment_update_options(eb_client, app_name, env_name, env_vars, port):
+    """Preserve existing settings and replica bounds when deploying a new image."""
+    configurations = eb_client.describe_configuration_settings(
+        ApplicationName=app_name, EnvironmentName=env_name
+    ).get("ConfigurationSettings", [])
+    if not configurations:
+        raise RuntimeError("Could not read existing environment settings; deployment update was not applied.")
+    existing = {}
+    for option in configurations[0].get("OptionSettings", []):
+        if option.get("Namespace") == "aws:elasticbeanstalk:eks:environment" and option.get("OptionName") == "env-variables":
+            try:
+                existing = json.loads(option.get("Value", "{}"))
+                if not isinstance(existing, dict):
+                    raise ValueError()
+            except (ValueError, TypeError):
+                raise RuntimeError("Existing environment settings are invalid; no values were printed.") from None
+    existing.update(env_vars)
+    existing["PORT"] = str(port)
+    return [
+        {"Namespace": "aws:elasticbeanstalk:eks:environment", "OptionName": "service-port", "Value": str(port)},
+        {"Namespace": "aws:elasticbeanstalk:eks:environment", "OptionName": "env-variables", "Value": json.dumps(existing)},
+    ]
 
 
 def _ensure_cluster_environment(
@@ -651,7 +681,7 @@ def _execute_deploy(
         eb.update_environment(
             EnvironmentName=env,
             VersionLabel=version_label,
-            OptionSettings=_build_cluster_option_settings(infra, env_vars, port),
+            OptionSettings=_existing_environment_update_options(eb, app, env, env_vars, port),
         )
         _ok(f"Deployment update started for '{env}'.")
 

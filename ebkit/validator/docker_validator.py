@@ -45,6 +45,7 @@ class ScoutResult:
     details: list[dict] = field(default_factory=list)
     raw_output: str = ""
     gate_reason: Optional[str] = None
+    artifact_kind: str = "image"
 
 
 class DockerBuildValidator:
@@ -165,6 +166,13 @@ class DockerScoutValidator:
         except Exception:
             return False
 
+    def scan_source(self, project_dir: Path, timeout: int = 180) -> ScoutResult:
+        """Scan source dependencies without resolving or building an application image."""
+        result = self.scan(f"fs://{project_dir.resolve()}", timeout=timeout)
+        result.artifact_kind = "source"
+        result.summary = f"Source dependencies: {result.summary} (application image not scanned)"
+        return result
+
     def scan(
         self,
         image_tag: str,
@@ -185,7 +193,7 @@ class DockerScoutValidator:
             "scout",
             "cves",
             "--format",
-            "json",
+            "sarif",
             image_tag,
         ]
 
@@ -200,6 +208,13 @@ class DockerScoutValidator:
                 timeout=timeout,
             )
             raw_text = proc.stdout or proc.stderr
+            if proc.returncode != 0:
+                return ScoutResult(
+                    gate_passed=False,
+                    summary="Docker Scout scan failed.",
+                    raw_output=raw_text,
+                    gate_reason=proc.stderr.strip() or f"Scout exited with code {proc.returncode}.",
+                )
 
             critical = 0
             high = 0
@@ -215,7 +230,48 @@ class DockerScoutValidator:
                 if isinstance(data, list):
                     vulnerabilities = data
                 elif isinstance(data, dict):
-                    vulnerabilities = data.get("vulnerabilities", []) or data.get("runs", [])
+                    vulnerabilities = data.get("vulnerabilities", [])
+                    if "runs" in data:
+                        for run in data["runs"]:
+                            rules = run.get("tool", {}).get("driver", {}).get("rules", [])
+                            for finding in run.get("results", []):
+                                index = finding.get("ruleIndex")
+                                if isinstance(index, int) and 0 <= index < len(rules):
+                                    rule = rules[index]
+                                else:
+                                    rule = next(
+                                        (rule for rule in rules if rule.get("id") == finding.get("ruleId")), {}
+                                    )
+                                properties = rule.get("properties", {})
+                                severity = properties.get("cvssV3_severity", "").upper()
+                                if severity not in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+                                    score = float(properties.get("security-severity", 0))
+                                    if score >= 9:
+                                        severity = "CRITICAL"
+                                    elif score >= 7:
+                                        severity = "HIGH"
+                                    elif score >= 4:
+                                        severity = "MEDIUM"
+                                    elif score > 0:
+                                        severity = "LOW"
+                                    else:
+                                        severity = "UNSPECIFIED"
+                                vulnerabilities.append({"id": finding.get("ruleId"), "severity": severity})
+                                cve_details.append({
+                                    "id": finding.get("ruleId"),
+                                    "severity": severity,
+                                    "packages": properties.get("purls", []),
+                                    "fixed_version": properties.get("fixed_version") or "not reported",
+                                    "paths": [
+                                        location.get("physicalLocation", {}).get("artifactLocation", {}).get("uri", "")
+                                        for location in finding.get("locations", [])
+                                    ],
+                                    "url": rule.get("helpUri", ""),
+                                })
+                    elif "vulnerabilities" not in data:
+                        raise ValueError("Unrecognized Scout report format")
+                else:
+                    raise ValueError("Unrecognized Scout report format")
 
                 # Tally severities
                 for item in vulnerabilities:
@@ -251,6 +307,13 @@ class DockerScoutValidator:
                     medium = int(med_m.group(1))
                 if low_m:
                     low = int(low_m.group(1))
+                if not any((crit_m, high_m, med_m, low_m)):
+                    return ScoutResult(
+                        gate_passed=False,
+                        summary="Docker Scout report could not be parsed.",
+                        raw_output=raw_text,
+                        gate_reason="Scout returned no recognized vulnerability report.",
+                    )
 
             total = critical + high + medium + low
 

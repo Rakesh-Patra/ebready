@@ -234,7 +234,7 @@ class ClusterModePreflightValidator:
         if scout_result is not None:
             if not scout_result.summary.startswith("Docker Scout plugin not available"):
                 report.add_check(
-                    name="Security Scan Gate",
+                    name="Source Dependency Security Gate" if scout_result.artifact_kind == "source" else "Security Scan Gate",
                     passed=scout_result.gate_passed,
                     details=(
                         f"Docker Scout security gate passed ({scout_result.summary})."

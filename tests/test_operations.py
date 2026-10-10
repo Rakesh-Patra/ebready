@@ -238,11 +238,78 @@ def test_destroy_terminates_only_selected_environment_and_keeps_shared_resources
         ),
     )
 
-    result = CliRunner().invoke(destroy_command, [], input="demo-cluster\n")
+    result = CliRunner().invoke(destroy_command, ["--keep-artifacts"], input="demo-cluster\n")
 
     assert result.exit_code == 0, result.output
     eb.terminate_environment.assert_called_once_with(EnvironmentName="demo-cluster")
-    assert "databases untouched" in result.output
+    assert "external databases" in result.output
     state = json.loads((tmp_path / "deployments.json").read_text(encoding="utf-8"))
     assert state["deployments"][0]["status"] == "Terminating"
     assert state["deployments"][0]["codebuild_project"] == "shared-build"
+
+
+def test_destroy_waits_before_artifact_cleanup_and_records_cluster(monkeypatch, tmp_path):
+    eb = MagicMock()
+    eb.describe_environments.side_effect = [
+        {"Environments": [_environment()]},
+        {"Environments": [_environment(Status="Terminating")]},
+        {"Environments": [_environment(Status="Terminated")]},
+    ]
+    eb.describe_environment_resources.return_value = {"EnvironmentResources": {
+        "Cluster": {"Name": "arn:aws:eks:us-east-2:123456789012:cluster/beanstalk-cluster-test"}
+    }}
+    session = MagicMock()
+    session.client.return_value = eb
+    monkeypatch.setenv("EBKIT_STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr("ebkit.commands.operations._aws_session", lambda _: (session, "123456789012"))
+    monkeypatch.setattr("ebkit.commands.operations._resolve_deployment", lambda *args: ("demo", "demo-cluster", {}))
+    cleanup = MagicMock(return_value=["Deleted eligible artifacts"])
+    monkeypatch.setattr("ebkit.commands.operations.cleanup_application_artifacts", cleanup)
+    monkeypatch.setattr("ebkit.commands.operations.cleanup_environment_logs", MagicMock(return_value=["stream"]))
+    def waiting(_):
+        cleanup.assert_not_called()
+    monkeypatch.setattr("ebkit.commands.operations.time.sleep", waiting)
+    result = CliRunner().invoke(destroy_command, [], input="demo-cluster\n")
+    assert result.exit_code == 0, result.output
+    cleanup.assert_called_once()
+    assert "three hours" in result.output
+    assert "stack-delete-complete" in result.output
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["deployments"][0]["status"] == "Terminated"
+    assert state["deployments"][0]["cluster_arn"].endswith("beanstalk-cluster-test")
+
+
+def test_destroy_timeout_does_not_delete_artifacts(monkeypatch, tmp_path):
+    eb = MagicMock()
+    eb.describe_environments.return_value = {"Environments": [_environment(Status="Terminating")]}
+    eb.describe_environment_resources.return_value = {"EnvironmentResources": {}}
+    session = MagicMock()
+    session.client.return_value = eb
+    monkeypatch.setenv("EBKIT_STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr("ebkit.commands.operations._aws_session", lambda _: (session, "123456789012"))
+    monkeypatch.setattr("ebkit.commands.operations._resolve_deployment", lambda *args: ("demo", "demo-cluster", {}))
+    monkeypatch.setattr("ebkit.commands.operations.time.monotonic", MagicMock(side_effect=[0, 2]))
+    cleanup = MagicMock()
+    monkeypatch.setattr("ebkit.commands.operations.cleanup_application_artifacts", cleanup)
+    result = CliRunner().invoke(destroy_command, ["--timeout", "1"], input="demo-cluster\n")
+    assert result.exit_code != 0
+    assert "charges may continue" in result.output
+    cleanup.assert_not_called()
+
+
+def test_application_logs_paginate_and_use_only_target_stream_prefix(monkeypatch):
+    logs = MagicMock()
+    logs.filter_log_events.side_effect = [
+        {"events": [{"timestamp": 1, "message": "started"}], "nextToken": "next"},
+        {"events": [{"timestamp": 2, "message": "request complete"}]},
+    ]
+    session = MagicMock()
+    session.client.return_value = logs
+    monkeypatch.setattr("ebkit.commands.operations._aws_session", lambda _: (session, "account"))
+    monkeypatch.setattr("ebkit.commands.operations._resolve_deployment", lambda *args: ("demo", "demo-cluster", {}))
+    result = CliRunner().invoke(logs_command, ["--source", "application", "--lines", "2"])
+    assert result.exit_code == 0, result.output
+    assert "started" in result.output and "request complete" in result.output
+    assert logs.filter_log_events.call_count == 2
+    for call in logs.filter_log_events.call_args_list:
+        assert call.kwargs["logStreamNamePrefix"] == "eb-demo-cluster."

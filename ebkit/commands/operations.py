@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -18,6 +19,8 @@ from ebkit.analyzer.diagnosis import get_diagnosis_engine
 from ebkit.commands.deploy import _codebuild_names
 from ebkit.config import load_config
 from ebkit.deployment_state import load_deployments, save_deployment
+from ebkit.cleanup import cleanup_environment_logs, cleanup_application_artifacts
+from ebkit.aws_resources import environment_resources
 
 _MAX_LOG_LINES = 500
 _MAX_DIAGNOSIS_RETRIES = 3
@@ -77,6 +80,7 @@ def _resolve_deployment(
     region: str,
     app: str | None,
     environment: str | None,
+    include_deleted: bool = False,
 ) -> tuple[str, str, dict[str, Any]]:
     entries = _matching_deployments(account_id, region, app, environment)
     record: dict[str, Any] = {}
@@ -99,7 +103,7 @@ def _resolve_deployment(
         response = eb.describe_environments(
             ApplicationName=app,
             EnvironmentNames=[environment],
-            IncludeDeleted=False,
+            IncludeDeleted=include_deleted,
         )
     except (BotoCoreError, ClientError) as exc:
         raise click.ClickException(f"Could not inspect Elastic Beanstalk environment: {exc}") from exc
@@ -253,10 +257,10 @@ def envlist_command(region: str | None) -> None:
 @click.option(
     "--source",
     "log_source",
-    type=click.Choice(["all", "build", "deployment"], case_sensitive=False),
+    type=click.Choice(["all", "build", "deployment", "application"], case_sensitive=False),
     default="all",
     show_default=True,
-    help="Which CodeBuild or Elastic Beanstalk logs to show.",
+    help="Show build logs, deployment events, application container logs, or all three.",
 )
 @click.option(
     "--lines",
@@ -279,6 +283,7 @@ def logs_command(
         session, account_id, selected_region, app, environment_name
     )
     source = log_source.lower()
+    unavailable_sources = []
     if source in ("all", "build"):
         build = _get_build(session, record)
         if not build:
@@ -287,7 +292,12 @@ def logs_command(
             click.echo(
                 f"CodeBuild {build.get('id', '')} [{build.get('buildStatus', 'Unknown')}]:"
             )
-            build_lines = _get_build_log_lines(session, build, lines)
+            try:
+                build_lines = _get_build_log_lines(session, build, lines)
+            except click.ClickException:
+                click.echo("Build logs unavailable. Check logs:GetLogEvents permission for the CodeBuild log group.")
+                unavailable_sources.append("build logs")
+                build_lines = []
             if build_lines:
                 click.echo("\n".join(build_lines))
             else:
@@ -303,6 +313,38 @@ def logs_command(
             severity = event.get("Severity", "")
             message = event.get("Message", "")
             click.echo(f"{timestamp} [{severity}] {message}")
+    if source in ("all", "application"):
+        click.echo(f"\nApplication container logs for {env_name} (last hour):")
+        try:
+            events = []
+            token = None
+            while True:
+                args = {
+                    "logGroupName": "/aws/elasticbeanstalk/application/logs",
+                    "logStreamNamePrefix": f"eb-{env_name}.",
+                    "startTime": int((time.time() - 3600) * 1000),
+                    "limit": lines,
+                }
+                if token:
+                    args["nextToken"] = token
+                page = session.client("logs").filter_log_events(**args)
+                events.extend(page.get("events", []))
+                next_token = page.get("nextToken")
+                if not next_token or next_token == token:
+                    break
+                token = next_token
+            for event in sorted(events, key=lambda item: item.get("timestamp", 0))[-lines:]:
+                click.echo(event.get("message", ""))
+            if not events:
+                click.echo("No application logs found. The application may not have emitted logs or uses another logging backend.")
+        except (BotoCoreError, ClientError) as exc:
+            if isinstance(exc, ClientError) and exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                click.echo("Application CloudWatch log group is not available yet.")
+            else:
+                click.echo("Application logs unavailable. Check logs:FilterLogEvents permission for the application log group.")
+                unavailable_sources.append("application logs")
+    if unavailable_sources:
+        raise click.ClickException("Some requested sources could not be read: " + ", ".join(unavailable_sources))
 
 
 def _redact_diagnostic_text(text: str) -> str:
@@ -393,12 +435,20 @@ def diagnose_command(
     eb = session.client("elasticbeanstalk")
     events = _deployment_events(eb, env_name, 50)
     build = _get_build(session, record)
-    build_lines = _get_build_log_lines(session, build, 200) if build else []
+    try:
+        build_lines = _get_build_log_lines(session, build, 200) if build else []
+    except click.ClickException:
+        click.echo("Build logs unavailable; diagnosis will use deployment events and build status. Check logs:GetLogEvents permission.")
+        build_lines = []
     error_parts = [
         f"{event.get('Severity', '')}: {event.get('Message', '')}"
         for event in events
         if str(event.get("Severity", "")).lower() in {"error", "fatal", "severe"}
     ]
+    if not error_parts and build and build.get("buildStatus") == "SUCCEEDED":
+        click.echo("No deployment error events found; the latest recorded CodeBuild build succeeded.")
+        click.echo("Use ebkit status for live health and ebkit logs --source application for runtime issues.")
+        return
     if build:
         error_parts.append(f"CodeBuild status: {build.get('buildStatus', 'Unknown')}")
         error_parts.extend(build_lines[-100:])
@@ -435,31 +485,47 @@ def diagnose_command(
 @click.option("--app", help="Elastic Beanstalk application name.")
 @click.option("--environment", "--env-name", "environment_name", help="Environment name.")
 @click.option("--region", help="AWS region; defaults to saved AWS configuration.")
+@click.option("--keep-artifacts", is_flag=True, help="Only request termination; retain images, build projects and logs.")
+@click.option("--timeout", default=1200, type=click.IntRange(1), help="Seconds to wait for environment termination before cleanup.")
 def destroy_command(
     app: str | None,
     environment_name: str | None,
     region: str | None,
+    keep_artifacts: bool,
+    timeout: int,
 ) -> None:
-    """Terminate one Elastic Beanstalk environment after explicit confirmation."""
+    """Terminate an environment and clean up eligible EBKit artifacts after confirmation."""
     selected_region = _region_option(region)
     session, account_id = _aws_session(selected_region)
     app_name, env_name, deployment = _resolve_deployment(
-        session, account_id, selected_region, app, environment_name
+        session, account_id, selected_region, app, environment_name, True
     )
     click.echo(
         f"This will terminate environment '{env_name}' in application '{app_name}' "
         f"({selected_region})."
     )
     click.echo(
-        "EBKit will leave ECR repositories, CodeBuild projects, IAM roles, "
-        "Elastic Beanstalk applications, and databases untouched."
+        "EBKit retains shared infrastructure, IAM roles and external databases. "
+        "Elastic Beanstalk deletes the managed EKS cluster three hours after its last environment is terminated; "
+        "cluster charges continue until deletion completes."
     )
+    if not keep_artifacts:
+        click.echo("After termination, delete this environment's CloudWatch streams and eligible EBKit-tagged "
+                   "ECR images/repository, CodeBuild project and build logs when no application environments remain. "
+                   "An empty application created by EBKit and its versions are also removed. "
+                   "Stored logs and images will be permanently removed.")
     if click.prompt("Type the exact environment name to confirm", type=str) != env_name:
         raise click.Abort()
     eb = session.client("elasticbeanstalk")
     try:
-        eb.terminate_environment(EnvironmentName=env_name)
-    except (BotoCoreError, ClientError) as exc:
+        current = eb.describe_environments(EnvironmentNames=[env_name], IncludeDeleted=True).get("Environments", [])
+        already_terminated = bool(current) and all(item.get("Status") == "Terminated" for item in current)
+        cluster_arn = deployment.get("cluster_arn")
+        if not already_terminated:
+            resources = environment_resources(eb, env_name, selected_region)
+            cluster_arn = resources.get("Cluster", {}).get("ClusterArn") or resources.get("Cluster", {}).get("Name")
+            eb.terminate_environment(EnvironmentName=env_name)
+    except (BotoCoreError, ClientError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
         raise click.ClickException(f"Could not terminate environment '{env_name}': {exc}") from exc
     entries = _matching_deployments(account_id, selected_region, app_name, env_name)
     deployment = deployment or (entries[-1] if entries else {
@@ -469,13 +535,44 @@ def destroy_command(
         "environment_name": env_name,
     })
     deployment["status"] = "Terminating"
+    if isinstance(cluster_arn, str) and cluster_arn:
+        deployment["cluster_arn"] = cluster_arn
     try:
         save_deployment(deployment)
     except (OSError, ValueError) as exc:
         raise click.ClickException(
             f"Environment termination started, but local deployment state could not be updated: {exc}"
         ) from exc
-    click.echo(f"Termination requested for '{env_name}'. Persistent and shared resources were not deleted.")
+    click.echo(f"Termination requested for '{env_name}'.")
+    if keep_artifacts:
+        click.echo("Artifact cleanup skipped (--keep-artifacts).")
+        return
+    started = time.monotonic()
+    try:
+        while True:
+            environments = eb.describe_environments(EnvironmentNames=[env_name], IncludeDeleted=True).get("Environments", [])
+            if environments and all(item.get("Status") == "Terminated" for item in environments):
+                break
+            if time.monotonic() - started >= timeout:
+                raise click.ClickException("Environment termination is still pending. Artifact cleanup was not run; "
+                                           "charges may continue. Inspect environment events and retry destroy.")
+            click.echo("Waiting for environment termination...")
+            time.sleep(10)
+        for message in cleanup_application_artifacts(session, app_name, deployment):
+            click.echo(message)
+        deleted = cleanup_environment_logs(session.client("logs"), env_name)
+        click.echo(f"Deleted {len(deleted)} environment CloudWatch log/metric streams; shared log groups retained.")
+        deployment["status"] = "Terminated"
+        deployment["artifact_cleanup"] = "Completed eligible cleanup"
+        save_deployment(deployment)
+    except (BotoCoreError, ClientError, OSError, ValueError) as exc:
+        raise click.ClickException(f"Termination requested, but artifact cleanup is incomplete: {exc}. "
+                                   "Retained resources may still incur charges.") from exc
+    click.echo("Environment terminated. EKS cleanup is managed by Elastic Beanstalk and may still be pending.")
+    if deployment.get("cluster_arn"):
+        stack_name = deployment["cluster_arn"].rsplit("/", 1)[-1]
+        click.echo("After the three-hour reuse interval, verify managed infrastructure deletion with:")
+        click.echo(f"  aws cloudformation wait stack-delete-complete --stack-name {stack_name} --region {selected_region}")
 
 
 status = status_command

@@ -31,6 +31,16 @@ from ebkit.validator.docker_validator import BuildResult, RuntimeResult, ScoutRe
 
 
 @pytest.fixture
+def isolated_cli_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("EBKIT_CONFIG_FILE", str(tmp_path / "ebkit-config"))
+
+
+@pytest.fixture(autouse=True)
+def isolate_settings(isolated_cli_config):
+    pass
+
+
+@pytest.fixture
 def sample_project(tmp_path: Path) -> Path:
     """Create a minimal valid FastAPI project for testing."""
     proj = tmp_path / "my_project"

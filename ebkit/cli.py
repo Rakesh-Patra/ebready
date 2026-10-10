@@ -24,6 +24,9 @@ from ebkit.commands.operations import (
     logs_command,
     status_command,
 )
+from ebkit.commands.manage import (
+    scale_command, config_command, versions_command, rollback_command, cleanup_status_command, resources_command,
+)
 
 
 @click.group()
@@ -41,6 +44,8 @@ cli.add_command(logs_command, name="logs")
 cli.add_command(diagnose_command, name="diagnose")
 cli.add_command(envlist_command, name="envlist")
 cli.add_command(destroy_command, name="destroy")
+for command in (scale_command, config_command, versions_command, rollback_command, cleanup_status_command, resources_command):
+    cli.add_command(command)
 
 
 def main() -> None:

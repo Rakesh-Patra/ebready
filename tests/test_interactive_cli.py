@@ -23,6 +23,8 @@ from ebkit.analyzer.scanner import ProjectScanner
 from ebkit.commands.init import init_command
 from ebkit.config import EBKitConfig, load_config, save_config
 from ebkit.models.deployment_config import DeploymentConfig
+from ebkit.generator.docker_ai import DockerAIService
+from ebkit.validator.docker_validator import DockerBuildValidator, DockerRuntimeValidator, DockerScoutValidator, ScoutResult
 from ebkit.repo_handler import safe_clone_repo, validate_github_url
 
 
@@ -43,6 +45,13 @@ def _create_sample_config() -> DeploymentConfig:
         "environment_variables": ["PORT"],
         "uncertainties": [],
     })
+
+
+@pytest.fixture(autouse=True)
+def isolated_local_tools(monkeypatch):
+    """CLI unit tests must not contact real AI/Scout services."""
+    monkeypatch.setattr(DockerAIService, "is_available", lambda _self: False)
+    monkeypatch.setattr(DockerScoutValidator, "is_scout_available", lambda _self: False)
 
 
 @pytest.fixture
@@ -100,7 +109,7 @@ class TestInteractiveCLI:
         assert "🤖 Running Gemini analysis..." in result.output
         assert "📦 Generating deployment kit..." in result.output
         assert "✓ Dockerfile" in result.output
-        assert "PROJECT READY FOR DEPLOYMENT" in result.output
+        assert "DEPLOYMENT FILES GENERATED" in result.output
         # No AWS prompts
         assert "AWS Region" not in result.output
         assert "Elastic Beanstalk Application" not in result.output
@@ -131,7 +140,7 @@ class TestInteractiveCLI:
 
         assert result.exit_code == 0, f"Error: {result.output}"
         assert "Local project path:" in result.output
-        assert "PROJECT READY FOR DEPLOYMENT" in result.output
+        assert "DEPLOYMENT FILES GENERATED" in result.output
 
         saved = load_config(config_file)
         assert saved is not None
@@ -253,7 +262,7 @@ class TestInteractiveCLI:
                     assert result.exit_code == 0, f"Error: {result.output}"
                     assert "GitHub repository URL:" in result.output
                     assert f"Cloning repository into {tmp_path / 'test-repo'}" in result.output
-                    assert "PROJECT READY FOR DEPLOYMENT" in result.output
+                    assert "DEPLOYMENT FILES GENERATED" in result.output
                     mock_clone.assert_called_once_with(
                         github_url,
                         dest_dir=tmp_path / "test-repo",
@@ -435,7 +444,7 @@ class TestInteractiveCLI:
                 assert "Using saved configuration:" in result.output
                 assert "AI Provider: Gemini" in result.output
                 assert "Continue? [Y/n]" in result.output
-                assert "PROJECT READY FOR DEPLOYMENT" in result.output
+                assert "DEPLOYMENT FILES GENERATED" in result.output
 
     def test_changing_saved_configuration(self, sample_project: Path, monkeypatch, tmp_path: Path):
         """User can decline saved configuration and modify preferences."""
@@ -493,7 +502,43 @@ class TestInteractiveCLI:
                     ["--path", str(sample_project), "--analyzer", "gemini", "--yes", "--no-build"],
                 )
         assert result.exit_code == 0, f"Error: {result.output}"
-        assert "PROJECT READY FOR DEPLOYMENT" in result.output
+        assert "DEPLOYMENT FILES GENERATED" in result.output
+
+
+@pytest.mark.parametrize("flags", [[], ["--no-build", "--scout"], ["--no-scout"]])
+def test_init_generates_and_scans_source_without_building(sample_project, tmp_path, monkeypatch, flags):
+    monkeypatch.setenv("EBKIT_CONFIG_FILE", str(tmp_path / "config"))
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    config = _create_sample_config()
+    with (
+        patch.object(GoogleAIAnalyzer, "__init__", return_value=None),
+        patch.object(GoogleAIAnalyzer, "analyze", return_value=config),
+        patch.object(DockerScoutValidator, "is_scout_available", return_value=True),
+        patch.object(DockerScoutValidator, "scan_source", return_value=ScoutResult(
+            gate_passed=True, artifact_kind="source", summary="Source dependencies scanned."
+        )) as source_scan,
+        patch.object(DockerScoutValidator, "scan") as image_scan,
+        patch.object(DockerBuildValidator, "is_docker_available") as daemon_check,
+        patch.object(DockerBuildValidator, "build") as build,
+        patch.object(DockerRuntimeValidator, "validate") as runtime,
+    ):
+        result = CliRunner().invoke(init_command, [
+            "--path", str(sample_project), "--analyzer", "gemini", "--yes", *flags
+        ])
+    assert result.exit_code == 0, result.output
+    assert (sample_project / "Dockerfile").is_file()
+    if "--no-scout" in flags:
+        source_scan.assert_not_called()
+        assert "SECURITY VALIDATION SKIPPED" in result.output
+        assert "Security readiness is NOT VERIFIED" in result.output
+    else:
+        source_scan.assert_called_once_with(sample_project)
+    image_scan.assert_not_called()
+    daemon_check.assert_not_called()
+    build.assert_not_called()
+    runtime.assert_not_called()
+    assert "DEPLOYMENT FILES GENERATED" in result.output
+    assert "PROJECT READY FOR DEPLOYMENT" not in result.output
 
 
 # ===========================================================================

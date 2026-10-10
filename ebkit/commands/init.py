@@ -195,6 +195,8 @@ def _print_stateful_service_deploy_guidance(
     repo_path: Path,
     repo_label: str,
     port: int,
+    environment_variables: Optional[list[str]] = None,
+    connection_variables: Optional[set[str]] = None,
 ) -> None:
     source = repo_label
     valid_url, _ = validate_github_url(source)
@@ -218,11 +220,31 @@ def _print_stateful_service_deploy_guidance(
         "Blank connection settings were added where none were detected; existing "
         ".env values were preserved."
     )
+    settings = sorted(set(environment_variables or []) - {"PORT"})
+    connections = connection_variables or set()
+    click.echo("\nSettings to configure in .env (use values from your service provider):")
+    for key in settings:
+        purpose = "external service connection value" if key in connections else "application setting; check your project documentation"
+        click.echo(f"  {key}=<YOUR_{key}>  ({purpose})")
+    click.echo(f"  PORT={port}")
+    click.echo("Connection URLs must use endpoints reachable from AWS, with the provider's credentials and TLS settings.")
+    if "POSTGRES_URL" in settings:
+        click.echo("  POSTGRES_URL format: postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require")
+    if "REDIS_URL" in settings:
+        click.echo("  REDIS_URL format: rediss://USER:PASSWORD@HOST:PORT")
     click.echo(
         "After pushing the root Dockerfile to GitHub, deploy with:\n"
         f"  ebkit deploy {source} --app {app_name} "
         f"--environment {app_name}-cluster --port {port} --env-file .env"
     )
+    if settings:
+        inline_settings = " ".join(f'--env "{key}=<YOUR_{key}>"' for key in settings)
+        click.echo(
+            "Or pass application settings directly (replace the placeholders):\n"
+            f"  ebkit deploy {source} --app {app_name} "
+            f"--environment {app_name}-cluster --port {port} {inline_settings}"
+        )
+        click.echo("You can also combine --env-file .env with repeated --env KEY=VALUE overrides.")
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +394,46 @@ def _check_gemini_key() -> None:
         os.environ["GEMINI_API_KEY"] = os.environ["GOOGLE_API_KEY"]
 
 
+def _choose_local_build(build: Optional[bool], runtime: Optional[bool], yes: bool) -> bool:
+    """Only build after an explicit flag or an affirmative interactive answer."""
+    if build is not None:
+        return build
+    if runtime is True:
+        return True
+    if yes:
+        return False
+    return click.confirm("Build the Docker image locally?", default=False)
+
+
+def _show_source_dependency_fixes(result: ScoutResult) -> None:
+    """Explain source findings without silently changing application dependencies."""
+    click.echo("\nDeployment files were generated. Vulnerable packages need attention:")
+    packages: dict[str, dict[str, set[str]]] = {}
+    for finding in result.details:
+        for package in finding.get("packages", []):
+            entry = packages.setdefault(package, {"fixes": set(), "paths": set(), "cves": set()})
+            entry["fixes"].add(str(finding.get("fixed_version") or "not reported"))
+            entry["paths"].update(path for path in finding.get("paths", []) if path)
+            entry["cves"].add(str(finding.get("id", "unknown")))
+    for package, entry in sorted(packages.items()):
+        click.echo(f"  * {package}: {len(entry['cves'])} CVEs")
+        click.echo(f"    Manifest: {', '.join(sorted(entry['paths'])) or 'not reported'}")
+        click.echo(f"    Reported fixed versions: {', '.join(sorted(entry['fixes']))}")
+    click.echo("\nAll reported vulnerability findings:")
+    for finding in result.details:
+        click.echo(f"  * {finding.get('id', 'unknown')} [{finding.get('severity', 'unknown')}]")
+        click.echo(f"    Package: {', '.join(finding.get('packages', [])) or 'not reported'}")
+        click.echo(f"    Location: {', '.join(finding.get('paths', [])) or 'not reported'}")
+        click.echo(f"    Fixed version: {finding.get('fixed_version') or 'not reported'}")
+        if finding.get("url"):
+            click.echo(f"    Advisory: {finding['url']}")
+    if not result.details:
+        click.echo("  No structured findings available; review the Scout scan error above.")
+    click.echo("Update affected dependencies and lockfiles or base images, test the application, then rerun init.")
+    click.echo("Some fixes may require a major upgrade; findings marked 'not fixed' need further review.")
+    click.echo("Generating another Dockerfile will not fix source dependency CVEs. The security gate remains enforced.")
+
+
 def _prompt_ai_provider(default_choice: str = "1") -> str:
     """Prompt user for AI Provider choice."""
     click.echo("\n🤖 AI Provider\n")
@@ -461,7 +523,7 @@ def _prompt_ai_provider(default_choice: str = "1") -> str:
 @click.option(
     "--build/--no-build",
     default=None,
-    help="Run local Docker build verification after artifact generation.",
+    help="Build locally or skip the build prompt (interactive default: No; --yes skips building).",
 )
 @click.option(
     "--runtime/--no-runtime",
@@ -471,7 +533,7 @@ def _prompt_ai_provider(default_choice: str = "1") -> str:
 @click.option(
     "--scout/--no-scout",
     default=None,
-    help="Run Docker Scout vulnerability scan and security gate.",
+    help="Run Docker Scout (source dependencies by default; built image with --build).",
 )
 @click.option(
     "--max-critical",
@@ -512,6 +574,8 @@ def init_command(
     """
     tmp_clone_dir: Optional[str] = None
     repo_label: str = ""
+    if build is False and runtime is True:
+        raise click.UsageError("--runtime cannot be combined with --no-build.")
     saved_cfg = load_config()
 
     # ── Non-interactive / CI Mode Validation ───────────────────────────────
@@ -843,16 +907,15 @@ def init_command(
 
     tag = f"ebready-{repo_path.name.lower()}:prod"
     builder = DockerBuildValidator()
-    docker_available = builder.is_docker_available()
-
-    should_build = build if build is not None else docker_available
+    should_build = _choose_local_build(build, runtime, yes)
+    docker_available = builder.is_docker_available() if should_build else False
 
     scout_validator = DockerScoutValidator(
         max_critical=max_critical,
         max_high=max_high,
     )
-    scout_available = scout_validator.is_scout_available()
-    should_scout = scout if scout is not None else (should_build and docker_available)
+    should_scout = scout is not False
+    scout_available = scout_validator.is_scout_available() if should_scout else False
 
     repair_attempt = 0
 
@@ -1125,13 +1188,25 @@ def init_command(
         # Build & test cycle finished cleanly
         break
 
+    if not should_build and scout is not False:
+        click.echo("\n🛡 Docker Scout — source dependencies (no image build)\n")
+        if scout_available:
+            scout_result = scout_validator.scan_source(repo_path)
+            click.echo(scout_result.summary)
+            if scout_result.gate_passed:
+                click.echo("✓ Source dependency security gate passed")
+            else:
+                click.echo(f"✗ Source dependency security gate failed: {scout_result.gate_reason}")
+        else:
+            click.echo("Docker Scout is unavailable. Source security validation: NOT VERIFIED.")
+
     # ── Step 7: Cluster Mode Preflight Evaluation ───────────────────────────
     preflight_validator = ClusterModePreflightValidator()
     if dockerfile_path.exists():
         kit.files["Dockerfile"] = dockerfile_path.read_text(encoding="utf-8")
 
-    require_build = (build is not False)
-    build_ok = (build is False) or (build_result is not None and build_result.success)
+    require_build = should_build
+    build_ok = not should_build or (build_result is not None and build_result.success)
 
     preflight_report = preflight_validator.evaluate(
         kit=kit,
@@ -1144,8 +1219,13 @@ def init_command(
     if preflight_report.ready_for_deployment and build_ok:
         click.echo("✓ Cluster Mode preflight\n")
         click.echo("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        click.echo("✅ PROJECT READY FOR DEPLOYMENT")
+        click.echo("✅ PROJECT READY FOR DEPLOYMENT" if should_build and scout is not False else "✅ DEPLOYMENT FILES GENERATED")
         click.echo("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        if not should_build:
+            click.echo("Local Docker build and runtime checks were not run; the application image was not scanned.")
+        if scout is False:
+            click.echo("\n⚠️ SECURITY VALIDATION SKIPPED: you bypassed Docker Scout with --no-scout.")
+            click.echo("No Scout vulnerability scan was performed. Security readiness is NOT VERIFIED; CVEs may remain.")
         if runtime_result and runtime_result.passed and runtime_result.is_running:
             live_url = runtime_result.url or f"http://localhost:{runtime_result.host_port}/"
             click.echo(f"\n🌐 Application running at: {live_url}")
@@ -1159,6 +1239,16 @@ def init_command(
                 click.echo(f"   * {failure}")
         if require_build and not build_ok:
             click.echo("\nDocker build was not successfully executed.")
+        if scout_result is not None and not scout_result.gate_passed:
+            _show_source_dependency_fixes(scout_result)
+            bypass_command = f'  ebkit init --path "{repo_path}" --port {resolved_port} --no-scout'
+            if build is not None:
+                bypass_command += " --build" if build else " --no-build"
+            if runtime is not None:
+                bypass_command += " --runtime" if runtime else " --no-runtime"
+            click.echo("\nIf you choose to skip Docker Scout, rerun using:")
+            click.echo(bypass_command)
+            click.echo("This bypass skips security validation; it does not fix the reported CVEs.")
         if tmp_clone_dir:
             shutil.rmtree(tmp_clone_dir, ignore_errors=True)
         sys.exit(1)
@@ -1173,6 +1263,8 @@ def init_command(
             repo_path,
             repo_label,
             resolved_port,
+            config.environment_variables,
+            _stateful_service_env_keys(scan),
         )
 
     # ── Cleanup temp clone ─────────────────────────────────────────────────

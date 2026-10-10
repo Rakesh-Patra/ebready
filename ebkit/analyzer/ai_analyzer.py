@@ -158,7 +158,7 @@ class GoogleAIAnalyzer(AIAnalyzer):
     Production analyzer backed by Google Gemini.
 
     Requires GOOGLE_API_KEY or GEMINI_API_KEY in the environment.
-    Supports google-generativeai SDK or native REST API client.
+    Supports google-genai SDK or native REST API client.
     """
 
     def __init__(self, model: str = "gemini-2.5-flash") -> None:
@@ -168,18 +168,13 @@ class GoogleAIAnalyzer(AIAnalyzer):
                 "Set GOOGLE_API_KEY or GEMINI_API_KEY environment variable."
             )
         self.model = model
-        self._genai_model = None
+        self._genai = None
 
         try:
-            import google.generativeai as genai  # type: ignore[import]
-            genai.configure(api_key=self.api_key)
-            self._genai_model = genai.GenerativeModel(
-                model_name=model,
-                system_instruction=_SYSTEM_PROMPT,
-                generation_config={"temperature": 0.1, "max_output_tokens": 1024},
-            )
-        except Exception:
-            self._genai_model = None
+            from google import genai
+            self._genai = genai
+        except ImportError:
+            pass
 
     def analyze(self, scan_result: ScanResult) -> DeploymentConfig:
         import time
@@ -191,7 +186,6 @@ class GoogleAIAnalyzer(AIAnalyzer):
             scan_json=json.dumps(scan_result.as_dict(), indent=2)
         )
 
-        models_to_try = [self.model]
         models_to_try = [self.model, "gemini-flash-latest", "gemini-2.5-flash-lite", "gemini-pro-latest"]
         seen = set()
         models_to_try = [m for m in models_to_try if not (m in seen or seen.add(m))]
@@ -200,6 +194,21 @@ class GoogleAIAnalyzer(AIAnalyzer):
         for try_model in models_to_try:
             for attempt in range(2):
                 try:
+                    if self._genai is not None:
+                        with self._genai.Client(
+                            api_key=self.api_key, http_options={"timeout": 30000}
+                        ) as client:
+                            response = client.models.generate_content(
+                                model=try_model,
+                                contents=user_content,
+                                config={
+                                    "system_instruction": _SYSTEM_PROMPT,
+                                    "temperature": 0.1,
+                                    "max_output_tokens": 8192,
+                                    "response_mime_type": "application/json",
+                                },
+                            )
+                            return self._parse_response(response.text or "")
                     url = f"https://generativelanguage.googleapis.com/v1beta/models/{try_model}:generateContent?key={self.api_key}"
                     payload = {
                         "system_instruction": {"parts": [{"text": _SYSTEM_PROMPT}]},

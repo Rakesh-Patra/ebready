@@ -439,6 +439,37 @@ class TestArtifactPlanning:
 
 
 class TestDockerBuildAndScoutValidators:
+    def test_scout_source_scan_uses_sarif_without_building(self, tmp_path):
+        validator = DockerScoutValidator(max_critical=0)
+        report = {"runs": [{
+            "tool": {"driver": {"rules": [{
+                "id": "CVE-test", "properties": {
+                    "security-severity": "9.8", "purls": ["pkg:npm/example@1.0"],
+                    "fixed_version": "1.1",
+                }
+            }]}},
+            "results": [{"ruleId": "CVE-test", "ruleIndex": 0, "level": "none"}],
+        }]}
+        with patch.object(validator, "is_scout_available", return_value=True), patch("subprocess.run") as run:
+            run.return_value = MagicMock(returncode=0, stdout=json.dumps(report), stderr="")
+            result = validator.scan_source(tmp_path)
+        command = run.call_args.args[0]
+        assert command == ["docker", "scout", "cves", "--format", "sarif", f"fs://{tmp_path.resolve()}"]
+        assert result.artifact_kind == "source"
+        assert result.critical_count == 1
+        assert result.gate_passed is False
+        assert result.details[0]["packages"] == ["pkg:npm/example@1.0"]
+        assert result.details[0]["fixed_version"] == "1.1"
+        assert "application image not scanned" in result.summary
+
+    @pytest.mark.parametrize("exit_code,output", [(1, "invalid format"), (0, "not a vulnerability report")])
+    def test_scout_errors_never_report_security_success(self, exit_code, output):
+        validator = DockerScoutValidator()
+        with patch.object(validator, "is_scout_available", return_value=True), patch("subprocess.run") as run:
+            run.return_value = MagicMock(returncode=exit_code, stdout=output, stderr="")
+            result = validator.scan("image:test")
+        assert result.gate_passed is False
+
     def test_docker_build_failure_captured(self, tmp_path: Path):
         validator = DockerBuildValidator()
         with patch.object(validator, "is_docker_available", return_value=True):

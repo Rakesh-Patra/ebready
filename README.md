@@ -31,6 +31,54 @@ ebkit --help
 On macOS or Linux, use `python3 -m pip install .` instead of `py -m pip install .`.
 To install the latest development version later, go to the cloned `ebready` folder and run the install command again. A PyPI package is not currently published.
 
+## Command reference
+
+- **`ebkit init`** — Generate the root Dockerfile and deployment files, validate
+  them, and scan source dependencies with Docker Scout. Interactive init asks before
+  a local build; `--no-scout` skips security scanning and reports it as unverified.
+- **`ebkit deploy GITHUB_URL`** — Build the application's root Dockerfile in AWS
+  CodeBuild, push the image to ECR, and deploy to Elastic Beanstalk Cluster Mode.
+- **`ebkit status`** — Show environment status, health, URL, and deployed version.
+- **`ebkit envlist`** — List environments in the selected AWS account and region.
+- **`ebkit logs`** — Show build logs, deployment events, and application container
+  logs. Select one with `--source build`, `deployment`, or `application`.
+- **`ebkit diagnose`** — Analyze deployment failures and suggest fixes. `--gemini`
+  optionally sends sanitized diagnostic context to Gemini; fixes are advisory.
+- **`ebkit resources`** — Show live environment resource identifiers and locally
+  recorded image/build identifiers. `--json` provides machine-readable output.
+- **`ebkit config`** — List application variable names with values hidden. Use
+  `--env-file`, repeated `--env KEY=VALUE`, or `--unset KEY` to update settings
+  without rebuilding the image.
+- **`ebkit scale --min 1 --max 3`** — Change application replica bounds. Cluster
+  Mode requires at least one replica; this does not pause EKS or stop cluster charges.
+- **`ebkit versions`** — List existing application versions available for rollback.
+- **`ebkit rollback --version LABEL`** — Deploy an existing application version
+  without rebuilding. Its image must still exist; database migrations and environment
+  settings are not rolled back.
+- **`ebkit destroy`** — Terminate the selected environment, wait for termination,
+  and clean up eligible deployment artifacts. Shared resources and external databases
+  are retained; `--keep-artifacts` skips artifact cleanup.
+- **`ebkit cleanup-status`** — Check deletion of the managed cluster stack recorded
+  by destroy. Pending cluster cleanup can still incur charges.
+
+Use `--app`, `--environment`, and `--region` on management commands to select a
+deployment explicitly, or use the saved deployment/configuration. Inspect options with:
+
+```powershell
+ebkit --help
+ebkit deploy --help
+ebkit config --help
+ebkit destroy --help
+```
+
+**There is no Cluster Mode pause command or scale-to-zero option.** AWS's
+[pause/resume procedure](https://docs.aws.amazon.com/elasticbeanstalk/latest/dg/environment-management-pause.html)
+sets an EC2 Auto Scaling group's capacity to zero for load-balanced Standard environments.
+EBKit uses EKS Cluster Mode, whose [replica bounds start at one](https://docs.aws.amazon.com/elasticbeanstalk/latest/dg/configuring-cluster-scaling.html).
+Use `scale --min 1 --max 1` to reduce application capacity, or `destroy` when the
+deployment is no longer needed. EKS deletion is service-managed and scheduled three
+hours after its last environment terminates; charges continue until deletion completes.
+
 ## Set up AWS access
 
 Install AWS CLI v2 using the [official AWS installation guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), then configure credentials. For local development, AWS IAM Identity Center (SSO) is preferred when your organization provides it.
@@ -119,7 +167,60 @@ ebkit deploy https://github.com/owner/project --app my-app --environment my-app-
 
 EBKit sends these values to the Elastic Beanstalk environment; it does not create a database, initialize schemas, or run application-specific migrations. Use a managed database such as Amazon RDS for durable production data, configure its network access securely, and run the migrations documented by your application. Do not commit real environment files or put secrets in Docker build arguments. Review who can view environment settings in AWS.
 
+The `.env` file stays on your computer; **you do not push it to GitHub**. Deploy reads
+the local file and configures its values as application environment variables in AWS.
+CodeBuild gets your code and root Dockerfile from GitHub. These application settings
+are supplied to the deployed container, not to the Docker build.
+
+For Devboard, create or edit `devboard/.env` with your database provider's actual values:
+
+```dotenv
+POSTGRES_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require
+PORT=8080
+```
+
+Use a database endpoint reachable from AWS and the TLS settings required by your
+provider. Replace every placeholder. Other applications may use different variable
+names; init lists detected settings, and `.env.example` documents the expected keys.
+Commit `.env.example` with blank values, and keep `.env` gitignored.
+
+Run deploy from the folder containing `.env`, or specify its path. For example,
+from the parent folder containing the `devboard` checkout:
+
+```powershell
+ebkit deploy https://github.com/Rakesh-Patra/devboard.git --app devboard --environment devboard-cluster --port 8080 --env-file ./devboard/.env
+```
+
+An absolute file path also works. Alternatively, pass settings directly:
+
+```powershell
+ebkit deploy https://github.com/Rakesh-Patra/devboard.git --app devboard --environment devboard-cluster --port 8080 --env "POSTGRES_URL=YOUR_CONNECTION_URL"
+```
+
+Repeat `--env KEY=VALUE` for additional settings. You can combine `--env-file` and
+`--env`; command-line values override matching keys in the file.
+
 ## Generate deployment files with `ebkit init`
+
+By default, `ebkit init` generates a root Dockerfile and deployment files, validates
+them statically, and runs Docker Scout against source dependencies using `fs://`.
+It does **not** build an application image or start a local container. This source
+scan does not verify the packages in a built image. Use `--no-scout` to skip Scout;
+if Scout is unavailable, init reports security validation as unverified.
+
+If the source security gate fails, deployment files remain generated, but readiness
+is blocked. Init lists affected packages, manifest paths, and Scout's reported fixed
+versions. Update dependencies and lockfiles, test compatibility, and rerun init;
+regenerating the Dockerfile does not fix source dependency CVEs. Some findings have
+no available fix. `--no-scout` remains an explicit option to skip scanning; it does
+not fix vulnerabilities.
+
+Local image verification is optional: request it with `ebkit init --build`.
+Interactive init also asks `Build the Docker image locally? [y/N]` after artifact validation.
+Press Enter to skip. `--no-build` skips this prompt, and `--yes` skips building unless
+you explicitly pass `--build` or `--runtime`.
+`--runtime` also explicitly requests a local build and runtime verification.
+`--scout` alone scans source dependencies and never triggers a build.
 
 Use the initializer if your project needs a Dockerfile or other deployment files. Get a Gemini API key from Google AI Studio and set it in your terminal before running the wizard.
 
@@ -168,7 +269,78 @@ To terminate a deployment environment:
 ebkit destroy --app my-app --environment my-app-cluster
 ```
 
-`destroy` requires typing the exact environment name. It terminates only that Elastic Beanstalk environment. It intentionally retains ECR repositories, CodeBuild projects, IAM roles, Elastic Beanstalk applications, and databases, which may be shared or persistent.
+`destroy` requires typing the exact environment name. It requests termination and waits
+up to 20 minutes (`--timeout SECONDS` changes this) before cleaning up eligible artifacts.
+It deletes the environment's CloudWatch log/metric streams, keeping the shared Cluster
+log groups and other environments' streams. If no active environment remains in the
+application, it removes matching EBKit-tagged CodeBuild projects, stops their running
+builds, deletes their build log groups, and removes the EBKit-tagged ECR repository and
+its images. Empty applications created by EBKit and their versions are also removed.
+Logs and images are permanently deleted. IAM roles and external databases are retained.
+Existing resources without matching ownership tags are reported as retained; those
+resources can still incur charges. New repositories and build projects created by
+deploy receive ownership tags. Cleanup requires the corresponding AWS delete permissions.
+
+Elastic Beanstalk owns the EKS cluster and its compute infrastructure. It schedules
+cluster deletion **three hours after the last environment on that cluster is terminated**.
+Other environments or a new deployment can keep that cluster active, and charges
+continue until deletion completes. EBKit records the cluster ARN and prints the
+read-only CloudFormation verification command. It does not manually delete the
+service-managed cluster or stack. See [AWS cluster deletion documentation](https://docs.aws.amazon.com/elasticbeanstalk/latest/dg/beanstalk-cluster-concepts.html#beanstalk-cluster-concepts-deletion).
+
+If termination times out or cleanup fails, destroy exits with an error and reports
+pending cleanup rather than claiming that all charges have stopped. You can retry
+cleanup for a recently terminated environment. Use `--keep-artifacts` to request only
+termination and preserve images, build projects and logs.
+
+## Manage the application from your terminal
+
+These commands use the same `--app`, `--environment`, and `--region` target selection
+as status. Without an explicit target, EBKit uses its saved deployment/configuration.
+Commands that change cloud settings ask for confirmation; `--yes` skips that prompt.
+Updates are asynchronous: use `status` and `logs` to check completion.
+
+```powershell
+ebkit resources --app my-app --environment my-app-cluster
+ebkit logs --source application --lines 100
+ebkit config
+ebkit config --env-file .env --env "LOG_LEVEL=info"
+ebkit config --unset OLD_SETTING
+ebkit scale --min 1 --max 3
+ebkit versions
+ebkit rollback --version EXISTING_VERSION_LABEL
+ebkit cleanup-status --app my-app --environment my-app-cluster
+```
+
+`resources` displays live Beanstalk resource identifiers plus locally recorded ECR
+image/CodeBuild identifiers; `--json` produces machine-readable metadata. It is not
+a cost estimate. `logs --source application` reads the selected environment's container
+logs from the default shared CloudWatch group for the last hour; `all` includes these
+alongside build logs and deployment events. Other logging backends are not queried.
+
+`config` lists variable names with all values hidden. With `--env-file` or repeated
+`--env`, it merges supplied values with existing settings, without rebuilding the image.
+Flags override matching file values. Blank settings are rejected; use `--unset` to
+remove a key. An unchanged `PORT` in the file is accepted, but changing/removing it
+requires redeploying with `--port`. Values are never printed or saved in local history.
+
+`scale` changes replica bounds from 1 to 100; minimum must not exceed maximum. It
+does not pause the cluster or stop EKS charges. A redeploy preserves existing settings
+and replica bounds, overrides explicitly supplied environment values, and updates PORT.
+
+`versions` lists existing application versions, with pagination. `rollback` requests
+deployment of an explicit existing label without rebuilding; its image must still exist
+in ECR. Configuration changes and database migrations are not rolled back.
+
+`cleanup-status` uses the locally recorded cluster ARN to check its CloudFormation
+stack, including after the application has been deleted. It reports pending deletion
+rather than treating environment termination as proof that cluster charges stopped.
+Its artifact cleanup summary is historical, not a fresh inventory of every AWS resource.
+
+See [AWS Cluster configuration options](https://docs.aws.amazon.com/elasticbeanstalk/latest/dg/command-options-general-eks.html)
+for replica bounds and application variables. These commands require the corresponding
+AWS read/update permissions. EBKit manages Beanstalk deployments, not unrelated resources
+throughout your AWS account.
 
 ## Troubleshooting
 
