@@ -36,3 +36,7 @@ htmlcov/
 
 # Local test workspaces
 .pytest-*/
+
+# One-off local verification artifacts
+/docs/lifecycle-verification-*.md
+/web/scripts/verify-backend.mjs

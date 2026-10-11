@@ -5,7 +5,7 @@
       "Sid": "TagEBKitWebsiteRepositories",
       "Effect": "Allow",
       "Action": "ecr:TagResource",
-      "Resource": "arn:aws:ecr:us-east-2:717056864326:repository/ebk-*"
+      "Resource": "arn:aws:ecr:REGION:ACCOUNT_ID:repository/ebk-*"
     }
   ]
 }

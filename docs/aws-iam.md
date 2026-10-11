@@ -47,12 +47,11 @@ Creating ECR repositories with EBKit's ownership tags requires both
 `TagResource`. These permissions belong to the deployment caller, not the
 CodeBuild service role. See [AWS ECR tag authorization](https://docs.aws.amazon.com/AmazonECR/latest/userguide/ecr-supported-iam-actions-tagging.html).
 
-For this workspace's website deployments, the narrow supplemental policy in
+The supplemental policy in
 [ebkit-ecr-tag-permission.json](ebkit-ecr-tag-permission.json) allows tagging
-`ebk-*` repositories in account `717056864326`, region `us-east-2`. An IAM
-administrator must attach it to `ebready-agent`; the file does not change AWS
-permissions by itself. Adapt the account, region and repository prefix for
-other deployments. This supplemental policy resolves the tagging denial only;
+`ebk-*` repositories. Replace `ACCOUNT_ID` and `REGION` with your deployment
+target before attaching it to the deployment identity. The file does not change
+AWS permissions by itself. This policy resolves the tagging denial only;
 the caller still needs the other deployment permissions below.
 
 The deploy caller needs permission to create/read and use the service roles, attach

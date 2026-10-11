@@ -85,10 +85,9 @@ Owners can read their projects through row-level security. Browser clients may c
 npm.cmd test -- --pool=threads --maxWorkers=1
 npm.cmd run build
 npm.cmd audit
-node scripts/verify-backend.mjs
 ```
 
-Tests cover account flows, wizard clicks, GitHub checks, command construction, ownership, allowlist enforcement, secret redaction and worker execution using mocked AWS subprocesses. The backend script checks Google's authorization endpoint and anonymous database denial. These checks do not create billable AWS resources. User sign-in and AWS role permissions still require end-to-end verification; unit tests do not prove them.
+Tests cover account flows, wizard clicks, GitHub checks, command construction, ownership, allowlist enforcement, secret redaction and worker execution using mocked AWS subprocesses. These checks do not create billable AWS resources. User sign-in and AWS role permissions still require end-to-end verification; unit tests do not prove them.
 
 ## Public hosting
 
