@@ -4,6 +4,8 @@ EBKit is a command-line tool for preparing applications and deploying a **public
 
 EBKit runs on your computer and deploys to **your AWS account**. It is not a hosted deployment service. AWS resources may incur charges.
 
+The [EBKit web dashboard](web/README.md) adds InsForge accounts and project storage, Google sign-in, email registration/login, GitHub validation and an authenticated worker for live AWS deployment controls. Demo mode remains available for testing without AWS actions. Live mode uses the server operator's AWS account and may incur charges.
+
 ## Before you start
 
 You will need:

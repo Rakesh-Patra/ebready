@@ -33,3 +33,6 @@ htmlcov/
 .roo
 .trae
 .windsurf
+
+# Local test workspaces
+.pytest-*/

@@ -32,6 +32,29 @@ project's CloudWatch log group.
 
 ## Caller role for deploy
 
+New IAM roles and policy changes can take time to propagate. EBKit retries
+CodeBuild project creation/update and build start only when AWS reports
+`InvalidInputException` mentioning `sts:AssumeRole`, with six bounded waits
+(2, 4, 8, 16, 30 and 30 seconds). Other permission and input errors fail
+immediately. If role assumption still fails, check the exact service-role ARN,
+its trust for `codebuild.amazonaws.com`, and STS availability in the target
+region. Administrator permissions on the caller do not replace the service
+role's trust policy.
+
+Creating ECR repositories with EBKit's ownership tags requires both
+`ecr:CreateRepository` and `ecr:TagResource` on the repository ARN. Giving only
+`CreateRepository` causes creation to fail with `AccessDeniedException` for
+`TagResource`. These permissions belong to the deployment caller, not the
+CodeBuild service role. See [AWS ECR tag authorization](https://docs.aws.amazon.com/AmazonECR/latest/userguide/ecr-supported-iam-actions-tagging.html).
+
+For this workspace's website deployments, the narrow supplemental policy in
+[ebkit-ecr-tag-permission.json](ebkit-ecr-tag-permission.json) allows tagging
+`ebk-*` repositories in account `717056864326`, region `us-east-2`. An IAM
+administrator must attach it to `ebready-agent`; the file does not change AWS
+permissions by itself. Adapt the account, region and repository prefix for
+other deployments. This supplemental policy resolves the tagging denial only;
+the caller still needs the other deployment permissions below.
+
 The deploy caller needs permission to create/read and use the service roles, attach
 the listed AWS-managed policies, pass roles to AWS, create the Elastic Beanstalk
 service-linked role if it does not exist, and manage the required CodeBuild project,

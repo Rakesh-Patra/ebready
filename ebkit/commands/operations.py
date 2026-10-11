@@ -132,7 +132,6 @@ def _get_build(session, record: dict[str, Any]) -> dict[str, Any] | None:
             builds = codebuild.list_builds_for_project(
                 projectName=project_name,
                 sortOrder="DESCENDING",
-                maxResults=1,
             ).get("ids", [])
             if not builds:
                 return None
@@ -177,7 +176,8 @@ def _deployment_events(eb, environment: str, limit: int) -> list[dict[str, Any]]
 @click.option("--app", help="Elastic Beanstalk application name.")
 @click.option("--environment", "--env-name", "environment_name", help="Environment name.")
 @click.option("--region", help="AWS region; defaults to saved AWS configuration.")
-def status_command(app: str | None, environment_name: str | None, region: str | None) -> None:
+@click.option("--json", "as_json", is_flag=True, help="Print structured live status for integrations.")
+def status_command(app: str | None, environment_name: str | None, region: str | None, as_json: bool = False) -> None:
     """Show environment health, deployment status, URL, and deployed version."""
     selected_region = _region_option(region)
     session, account_id = _aws_session(selected_region)
@@ -197,6 +197,12 @@ def status_command(app: str | None, environment_name: str | None, region: str | 
         raise click.ClickException(f"Elastic Beanstalk environment '{env_name}' was not found.")
 
     environment = environments[0]
+    if as_json:
+        cname = environment.get("CNAME")
+        click.echo(json.dumps({"application": app_name, "environment": env_name,
+            "status": environment.get("Status", "Unknown"), "health": environment.get("Health", "Unknown"),
+            "url": f"https://{cname}" if cname else None, "version": environment.get("VersionLabel")}))
+        return
     click.echo(f"Application: {app_name}")
     click.echo(f"Environment: {environment.get('EnvironmentName', env_name)}")
     click.echo(f"Status: {environment.get('Status', 'Unknown')}")

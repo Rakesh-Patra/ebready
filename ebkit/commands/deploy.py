@@ -313,6 +313,32 @@ def _wait_for_codebuild(codebuild_client, build_id: str, timeout: int = 3600) ->
         time.sleep(10)
 
 
+def _codebuild_role_call(codebuild_client, operation: str, **arguments):
+    """Retry only CodeBuild's service-role visibility error after IAM changes."""
+    delays = (2, 4, 8, 16, 30, 30)
+    for attempt in range(len(delays) + 1):
+        try:
+            return getattr(codebuild_client, operation)(**arguments)
+        except ClientError as exc:
+            error = exc.response.get("Error", {})
+            role_not_ready = (
+                error.get("Code") == "InvalidInputException"
+                and "sts:assumerole" in error.get("Message", "").lower()
+            )
+            if not role_not_ready:
+                raise
+            if attempt == len(delays):
+                raise RuntimeError(
+                    "CodeBuild still cannot assume its service role after waiting for IAM "
+                    "propagation. Check the role ARN, trust for codebuild.amazonaws.com, "
+                    "and regional STS availability. No build was confirmed by this request."
+                ) from exc
+            delay = delays[attempt]
+            _info(f"Waiting {delay}s for CodeBuild service-role propagation "
+                  f"(retry {attempt + 1}/{len(delays)})...")
+            time.sleep(delay)
+
+
 def _build_image_in_aws(
     iam_client,
     codebuild_client,
@@ -390,14 +416,15 @@ def _build_image_in_aws(
                  {"key": "EBKitApplication", "value": app_name}],
     }
     try:
-        codebuild_client.create_project(**project_args)
+        _codebuild_role_call(codebuild_client, "create_project", **project_args)
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") != "ResourceAlreadyExistsException":
             raise
         project_args.pop("tags", None)  # Do not claim ownership of a pre-existing project.
-        codebuild_client.update_project(**project_args)
+        _codebuild_role_call(codebuild_client, "update_project", **project_args)
 
-    result = codebuild_client.start_build(
+    result = _codebuild_role_call(
+        codebuild_client, "start_build",
         projectName=project_name,
         environmentVariablesOverride=[
             {

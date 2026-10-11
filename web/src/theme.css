@@ -1,0 +1,28 @@
+
+:root{color-scheme:light}
+:root[data-theme=dark]{color-scheme:dark;background:#111315;color:#f0f1f2;--line:#35393e;--muted:#adb3bc}
+[data-theme=dark] :is(.sidebar,.topbar,.stats,.project-card,.panel,.modal,.search,.floating){background:#1c1f23;border-color:var(--line)}
+[data-theme=dark] .empty-state{background:linear-gradient(170deg,#1c1f23,#171a1e)}
+[data-theme=dark] :is(.button,.workspace-avatar,.account-avatar,.project-icon,.guide-icon,.empty-cube,.add-card>span,.section-heading h2>span,.nav-count){background:#2a2e34;border-color:#42474e;color:#e1e5ea}
+[data-theme=dark] .button.primary{background:var(--orange);border-color:var(--orange);color:#fff}
+[data-theme=dark] .button.danger{background:#3a2424;border-color:#7e4541;color:#ffb6aa}
+[data-theme=dark] :is(.cli-callout,.bottom-guide,.notice,.demo-pill,.live-app-link){background:#242a27;border-color:#3c4940;color:#c1d4b9}
+[data-theme=dark] .live-app-link:hover{background:#303b32}
+[data-theme=dark] .nav-item.active{background:#2c382e;color:#deefd7}
+[data-theme=dark] :is(.nav-item,.modal label,.topbar strong,.icon-button,.cli-callout button,.text-button,.tabs button,.repo-link,.file-import){color:#c2cad2}
+[data-theme=dark] :is(.field-help,.modal-description,.notice p,.cli-callout p,.import-row small,.optional,.detail-summary,.variable-list span,.variable-list p,.danger-zone p,.compact p,.account small,.workspace small){color:#aeb9b0}
+[data-theme=dark] .modal :is(input:not([type=checkbox]):not([type=file]),select,textarea){background:#15181b;color:#f0f1f2;border-color:#454c54}
+[data-theme=dark] .search input{color:#f0f1f2}
+[data-theme=dark] input::placeholder,[data-theme=dark] textarea::placeholder{color:#929da8}
+[data-theme=dark] code{background:#313a30;color:#d2e3c6}
+[data-theme=dark] .announcement{background:#352f24;border-color:#514735;color:#ead0a1}
+[data-theme=dark] .announcement button{color:#ead0a1}
+[data-theme=dark] .status{background:#403627;color:#e6ca96}
+[data-theme=dark] .status.ready{background:#2c3b2c;color:#bdd6a8}
+[data-theme=dark] .status.failed{background:#492b27;color:#ffc0ae}
+[data-theme=dark] .status.destroyed{background:#30343a;color:#c1c7ce}
+[data-theme=dark] :is(.stage-list>div,.variable-list>div){border-color:var(--line)}
+[data-theme=dark] .form-error{background:#3a2521;border-color:#754436;color:#ffbfaa}
+[data-theme=dark] .overlay{background:#0009}
+.theme-toggle{flex-shrink:0}
+@media(max-width:600px){.theme-toggle span{display:none}}

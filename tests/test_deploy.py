@@ -2,13 +2,15 @@ import json
 from unittest.mock import MagicMock, patch
 
 import click
+import pytest
 from click.testing import CliRunner
-from botocore.exceptions import ParamValidationError
+from botocore.exceptions import ClientError, ParamValidationError
 
 from ebkit.commands.deploy import (
     _build_cluster_option_settings,
     _build_image_in_aws,
     _codebuild_names,
+    _codebuild_role_call,
     _collect_env_vars,
     _ensure_cluster_environment,
     _execute_deploy,
@@ -18,6 +20,44 @@ from ebkit.commands.deploy import (
     _wait_for_codebuild,
     deploy,
 )
+
+
+@pytest.mark.parametrize("operation", ["create_project", "update_project", "start_build"])
+def test_codebuild_retries_role_propagation(operation):
+    client = MagicMock()
+    method = getattr(client, operation)
+    pending = ClientError({"Error": {"Code": "InvalidInputException", "Message":
+                         "CodeBuild is not authorized to perform: sts:AssumeRole on service role"}}, operation)
+    method.side_effect = [pending, pending, {"success": True}]
+    with patch("ebkit.commands.deploy.time.sleep") as sleep:
+        assert _codebuild_role_call(client, operation, name="example") == {"success": True}
+    assert method.call_count == 3
+    assert [call.args[0] for call in sleep.call_args_list] == [2, 4]
+    assert all(call.kwargs == {"name": "example"} for call in method.call_args_list)
+
+
+def test_codebuild_role_retry_is_bounded():
+    client = MagicMock()
+    client.create_project.side_effect = ClientError({"Error": {"Code": "InvalidInputException", "Message":
+                                "CodeBuild is not authorized to perform: sts:AssumeRole"}}, "CreateProject")
+    with patch("ebkit.commands.deploy.time.sleep") as sleep:
+        with pytest.raises(RuntimeError, match="regional STS"):
+            _codebuild_role_call(client, "create_project", name="example")
+    assert client.create_project.call_count == 7
+    assert sleep.call_count == 6
+
+
+@pytest.mark.parametrize("code,text", [("AccessDeniedException", "Caller lacks iam:PassRole"),
+                                      ("InvalidInputException", "Invalid source configuration"),
+                                      ("ResourceAlreadyExistsException", "Project exists")])
+def test_codebuild_does_not_retry_unrelated_errors(code, text):
+    client = MagicMock()
+    client.create_project.side_effect = ClientError({"Error": {"Code": code, "Message": text}}, "CreateProject")
+    with patch("ebkit.commands.deploy.time.sleep") as sleep:
+        with pytest.raises(ClientError):
+            _codebuild_role_call(client, "create_project", name="example")
+    assert client.create_project.call_count == 1
+    sleep.assert_not_called()
 
 
 def test_codebuild_names_are_bounded_and_repository_specific():

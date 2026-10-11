@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TagEBKitWebsiteRepositories",
+      "Effect": "Allow",
+      "Action": "ecr:TagResource",
+      "Resource": "arn:aws:ecr:us-east-2:717056864326:repository/ebk-*"
+    }
+  ]
+}

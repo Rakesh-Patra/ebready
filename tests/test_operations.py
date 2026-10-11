@@ -81,6 +81,13 @@ def test_status_shows_health_url_and_version(monkeypatch):
     assert "Health: Green (Ok)" in result.output
     assert "https://demo.example.com" in result.output
     assert "Deployed version: demo-v3" in result.output
+    structured = CliRunner().invoke(status_command, ["--json"])
+    assert structured.exit_code == 0
+    actual = json.loads(structured.output)
+    assert actual["status"] == "Ready"
+    assert actual["health"] == "Green"
+    assert actual["version"] == "demo-v3"
+
 
 
 def test_envlist_paginates_environment_results(monkeypatch):
@@ -316,3 +323,16 @@ def test_application_logs_paginate_and_use_only_target_stream_prefix(monkeypatch
     assert logs.filter_log_events.call_count == 2
     for call in logs.filter_log_events.call_args_list:
         assert call.kwargs["logStreamNamePrefix"] == "eb-demo-cluster."
+
+
+def test_latest_build_lookup_uses_supported_codebuild_parameters():
+    import boto3
+    from botocore.stub import Stubber
+    from ebkit.commands.operations import _get_build
+    client = boto3.client("codebuild", region_name="us-east-2", aws_access_key_id="testing", aws_secret_access_key="testing")
+    session = MagicMock()
+    session.client.return_value = client
+    with Stubber(client) as stub:
+        stub.add_response("list_builds_for_project", {}, {"projectName": "project", "sortOrder": "DESCENDING"})
+        assert _get_build(session, {"codebuild_project": "project"}) is None
+        stub.assert_no_pending_responses()
