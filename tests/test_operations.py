@@ -208,6 +208,9 @@ def test_destroy_requires_exact_environment_confirmation(monkeypatch):
 
     assert result.exit_code != 0
     assert "Aborted" in result.output
+    assert "TerminateEnvironment" in result.output
+    assert "DeleteProject" in result.output
+    assert "no permission preflight" in result.output
     eb.terminate_environment.assert_not_called()
 
 

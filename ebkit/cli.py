@@ -2,8 +2,10 @@
 EBKit CLI entry point.
 
 Usage:
+  ebkit COMMAND --help
   ebkit init [OPTIONS]
-  ebkit --help
+  ebkit deploy GITHUB_URL [OPTIONS]
+  ebkit status [OPTIONS]
 """
 
 import sys
@@ -29,7 +31,15 @@ from ebkit.commands.manage import (
 )
 
 
-@click.group()
+@click.group(
+    epilog=(
+        "Getting started: verify your AWS account with `aws sts get-caller-identity`, "
+        "then run `ebkit deploy --help` or `ebkit init --help`. Deploy requires a "
+        "public GitHub repository with a root Dockerfile. Commands that change AWS "
+        "resources may incur charges; review the target and confirmation prompts. "
+        "Run `ebkit COMMAND --help` for command-specific options."
+    )
+)
 @click.version_option(package_name="ebkit")
 def cli() -> None:
     """

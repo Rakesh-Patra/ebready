@@ -481,7 +481,23 @@ def diagnose_command(
     )
 
 
-@click.command("destroy")
+@click.command(
+    "destroy",
+    epilog=(
+        "IAM information only; EBKit does not preflight permissions or add an IAM-role gate. "
+        "AWS still enforces permissions for each API call. Use a dedicated operator IAM role. "
+        "Termination needs "
+        "elasticbeanstalk:DescribeEnvironments, "
+        "elasticbeanstalk:DescribeEnvironmentResources, and "
+        "elasticbeanstalk:TerminateEnvironment. Artifact cleanup also needs "
+        "elasticbeanstalk:DescribeApplications, elasticbeanstalk:DeleteApplication, "
+        "codebuild:BatchGetProjects, codebuild:ListBuildsForProject, codebuild:BatchGetBuilds, "
+        "codebuild:StopBuild, codebuild:DeleteProject, logs:DescribeLogStreams, "
+        "logs:DeleteLogStream, logs:DeleteLogGroup, ecr:DescribeRepositories, "
+        "ecr:ListTagsForResource, and ecr:DeleteRepository. Scope permissions where supported; "
+        "see README. Avoid AdministratorAccess."
+    ),
+)
 @click.option("--app", help="Elastic Beanstalk application name.")
 @click.option("--environment", "--env-name", "environment_name", help="Environment name.")
 @click.option("--region", help="AWS region; defaults to saved AWS configuration.")
@@ -509,11 +525,28 @@ def destroy_command(
         "Elastic Beanstalk deletes the managed EKS cluster three hours after its last environment is terminated; "
         "cluster charges continue until deletion completes."
     )
+    click.echo(
+        "IAM information only; no permission preflight or extra IAM-role gate is performed. "
+        "AWS still enforces permissions for each API call. Use a dedicated operator IAM role. "
+        "Termination actions: "
+        "elasticbeanstalk:DescribeEnvironments, "
+        "elasticbeanstalk:DescribeEnvironmentResources, "
+        "elasticbeanstalk:TerminateEnvironment."
+    )
     if not keep_artifacts:
         click.echo("After termination, delete this environment's CloudWatch streams and eligible EBKit-tagged "
                    "ECR images/repository, CodeBuild project and build logs when no application environments remain. "
                    "An empty application created by EBKit and its versions are also removed. "
                    "Stored logs and images will be permanently removed.")
+        click.echo(
+            "Artifact cleanup actions: elasticbeanstalk:DescribeApplications, "
+            "elasticbeanstalk:DeleteApplication, codebuild:BatchGetProjects, "
+            "codebuild:ListBuildsForProject, codebuild:BatchGetBuilds, codebuild:StopBuild, "
+            "codebuild:DeleteProject, logs:DescribeLogStreams, logs:DeleteLogStream, "
+            "logs:DeleteLogGroup, ecr:DescribeRepositories, ecr:ListTagsForResource, "
+            "ecr:DeleteRepository. See destroy --help and README for scope guidance; "
+            "avoid AdministratorAccess."
+        )
     if click.prompt("Type the exact environment name to confirm", type=str) != env_name:
         raise click.Abort()
     eb = session.client("elasticbeanstalk")

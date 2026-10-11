@@ -31,6 +31,58 @@ ebkit --help
 On macOS or Linux, use `python3 -m pip install .` instead of `py -m pip install .`.
 To install the latest development version later, go to the cloned `ebready` folder and run the install command again. A PyPI package is not currently published.
 
+## First deployment: quick start
+
+Use this path if you already have AWS access and a public GitHub repository with a
+root-level `Dockerfile`. It deploys to your AWS account and may create billable
+resources.
+
+1. **Check your AWS identity and region.** Sign in with your organization's approved
+   AWS profile, then verify the account before continuing:
+
+   ```powershell
+   aws sts get-caller-identity
+   $env:AWS_DEFAULT_REGION = "us-east-2"
+   ```
+
+   On macOS/Linux, set the region with `export AWS_DEFAULT_REGION=us-east-2`.
+   Replace the example region with the region you intend to use.
+
+2. **Prepare the application.** If the public GitHub repository already has its
+   Dockerfile at the repository root, skip to step 3. Otherwise, from the application
+   folder run `ebkit init --path .`. Init may need a configured AI provider; Gemini is
+   the default supported provider. Review the generated Dockerfile and files, test the
+   application, then commit and push them to GitHub. You can also initialize a public
+   GitHub project with `ebkit init --repo https://github.com/OWNER/REPOSITORY`.
+   Init does not deploy the app or provision its database.
+
+3. **Deploy the public GitHub repository.** Replace the URL, app name, environment,
+   region, and port with your values. The first deployment asks for confirmation:
+
+   ```powershell
+   ebkit deploy https://github.com/OWNER/REPOSITORY --app my-app --environment my-app-cluster --region us-east-2 --port 8080
+   ```
+
+   If the app needs runtime settings, keep them in a local `.env` file that is
+   excluded from Git and add `--env-file .env`. Do not paste secrets into shared
+   terminals, source code, or a committed file. The container must listen on
+   `0.0.0.0` and on the same port you provide to EBKit.
+
+4. **Check the result and troubleshoot.**
+
+   ```powershell
+   ebkit status --app my-app --environment my-app-cluster --region us-east-2
+   ebkit logs --app my-app --environment my-app-cluster --region us-east-2
+   ```
+
+   Wait for `Ready` and a healthy status before considering deployment complete.
+   `ebkit diagnose --app my-app --environment my-app-cluster` provides suggestions
+   if deployment fails; it does not automatically change your code or AWS resources.
+
+If a command behaves unexpectedly, run `ebkit --help` or `ebkit COMMAND --help`.
+For interactive workflows, omit `--yes`; it skips confirmation prompts and should
+only be used when you intentionally want non-interactive execution.
+
 ## Command reference
 
 - **`ebkit init`** — Generate the root Dockerfile and deployment files, validate
@@ -125,18 +177,47 @@ The source bundle must have the Dockerfile at its root. Do not put an extra pare
 
 ### AWS IAM permissions and roles
 
-The AWS identity used to run `ebkit deploy` must be allowed to provision the deployment resources. Having permission to deploy one application does not necessarily grant permission to create the roles or resources for another. In particular, EBKit creates a repository-specific CodeBuild service role; AWS may reject a first deployment with `AccessDenied` for `iam:CreateRole` before the image build starts.
+Use a dedicated deployment IAM role for `ebkit deploy`. The role assumed by the
+person or automation running EBKit is the **caller role**; it is distinct from the
+service roles below, which AWS services assume. The caller role needs permissions to
+create/use the roles, CodeBuild project, ECR repository, and Elastic Beanstalk resources.
+Scope permissions to the account, region, resource names, and role ARNs wherever AWS
+supports resource-level permissions. A first deployment can fail with `AccessDenied`
+if the caller role cannot create the roles.
 
-Ask your AWS administrator to authorize the deploy identity for the following operations, scoped to the account, region, resource names, and role ARNs where supported:
+EBKit creates or reuses these Cluster Mode **service roles**:
 
-- **IAM role setup:** `iam:GetRole`, `iam:CreateRole`, `iam:AttachRolePolicy`, and `iam:PutRolePolicy`; `iam:PassRole` for the repository-specific CodeBuild role and the Cluster, node, and observability roles; and `iam:CreateServiceLinkedRole` for `elasticbeanstalk.amazonaws.com` when that service-linked role is not already present.
-- **Cluster service roles:** permission to attach the AWS-managed policies used by Cluster Mode. EBKit checks or creates `aws-elasticbeanstalk-eks-cluster-role`, `aws-elasticbeanstalk-eks-node-role`, and `aws-elasticbeanstalk-eks-observability-role`. These roles trust EKS or EC2 as appropriate and use the EKS cluster, worker-node, ECR read-only, CNI, Elastic Beanstalk platform, and CloudWatch Agent policies.
-- **Build role:** permission to create or update the repository-specific CodeBuild project and start/read its builds. EBKit adds an inline policy to its CodeBuild role for ECR image upload and CloudWatch Logs writes.
-- **Deployment resources:** permissions for the required ECR repository operations, Elastic Beanstalk application/version/environment create or update operations, and EC2 default VPC/subnet reads.
+| Role | Trusted service | AWS-managed policies attached by EBKit |
+|---|---|---|
+| `aws-elasticbeanstalk-eks-cluster-role` | `eks.amazonaws.com` | `arn:aws:iam::aws:policy/AmazonEKSClusterPolicy`; `arn:aws:iam::aws:policy/AWSElasticBeanstalkCustomPlatformforEC2Role` |
+| `aws-elasticbeanstalk-eks-node-role` | `ec2.amazonaws.com` | `arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy`; `arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly`; `arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy`; `arn:aws:iam::aws:policy/AWSElasticBeanstalkMulticontainerDocker` |
+| `aws-elasticbeanstalk-eks-observability-role` | `ec2.amazonaws.com` | `arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy` |
+| Repository-specific `ebkit-…-build-role` | `codebuild.amazonaws.com` | EBKit adds the inline policy `EBKitBuildAndPushImage`; see actions below. |
+| `AWSServiceRoleForElasticBeanstalk` | `elasticbeanstalk.amazonaws.com` | AWS-managed service-linked role; EBKit requests its creation if absent. |
 
-The IAM identity that runs EBKit is separate from the service roles used by CodeBuild and Elastic Beanstalk. The deploy identity needs permission to pass the service roles to AWS; AWS services then assume those roles using their trust policies. Do not solve an access-denied error by sharing credentials or granting unrestricted administrator access. Have an administrator review and approve a least-privilege policy for your account. If the roles already exist, the deploy identity still needs permission to read and use them, and to pass them where required.
+The `EBKitBuildAndPushImage` inline policy allows `ecr:GetAuthorizationToken`
+(`Resource: "*"`) and the following actions scoped to the application's ECR repository:
+`ecr:BatchCheckLayerAvailability`, `ecr:CompleteLayerUpload`,
+`ecr:InitiateLayerUpload`, `ecr:PutImage`, and `ecr:UploadLayerPart`. It also permits
+`logs:CreateLogGroup`, `logs:CreateLogStream`, and `logs:PutLogEvents` for that
+CodeBuild project's CloudWatch log group.
 
-The initial IAM setup can be involved. If the list feels tedious and you are tempted to grant `AdministratorAccess` just to get past setup, do not use that as a shortcut: it grants broad access to your AWS account beyond what EBKit needs. Ask your AWS administrator to create or provide a dedicated deployment role with the permissions above instead.
+The deployment **caller role** needs, at minimum, the IAM setup actions
+`iam:GetRole`, `iam:CreateRole`, `iam:AttachRolePolicy`, `iam:PutRolePolicy`,
+`iam:PassRole`, and `iam:CreateServiceLinkedRole` (the latter only if the
+Elastic Beanstalk service-linked role is absent). It also needs the required
+CodeBuild project/build actions, ECR repository and image actions, Elastic Beanstalk
+application/version/environment actions, and EC2 default VPC/subnet read actions.
+The AWS services assume their own service roles; do not attach those service-role
+policies to the caller role as a substitute for `iam:PassRole`.
+
+Have an AWS administrator review and approve a least-privilege caller role for your
+account. If the service roles already exist, the caller role still needs permission to
+read/use them and pass them to the relevant AWS services. Do not share credentials or
+grant unrestricted administrator access merely to bypass a setup error. If the
+permissions feel tedious, ask an administrator for the scoped role; treat
+`AdministratorAccess` only as an explicitly approved, temporary break-glass measure,
+not a routine or permanent role.
 
 An earlier successful deployment may have used roles that were already present or an AWS identity with broader permissions. A later deployment can still fail if it needs a new role, such as the CodeBuild role for a different repository.
 
@@ -282,6 +363,52 @@ Logs and images are permanently deleted. IAM roles and external databases are re
 Existing resources without matching ownership tags are reported as retained; those
 resources can still incur charges. New repositories and build projects created by
 deploy receive ownership tags. Cleanup requires the corresponding AWS delete permissions.
+
+### IAM permissions for `destroy`
+
+Run `destroy` using a dedicated operator IAM role (for example, an AWS IAM Identity
+Center role). This is the operator/caller role, not one of the EBKit service roles.
+`destroy` does not create or assume an EBKit service role; the Elastic Beanstalk
+service manages termination of its environment and EKS cluster. The caller role needs
+these actions for termination:
+
+- `elasticbeanstalk:DescribeEnvironments`
+- `elasticbeanstalk:DescribeEnvironmentResources`
+- `elasticbeanstalk:TerminateEnvironment`
+
+EBKit calls `sts:GetCallerIdentity` to determine the AWS account, but AWS does not
+require an explicit allow for that action.
+
+Unless `--keep-artifacts` is specified, the same caller identity also needs these
+actions for the optional post-termination cleanup:
+
+- Elastic Beanstalk: `elasticbeanstalk:DescribeApplications`,
+  `elasticbeanstalk:DeleteApplication`
+- CodeBuild: `codebuild:BatchGetProjects`, `codebuild:ListBuildsForProject`,
+  `codebuild:BatchGetBuilds`, `codebuild:StopBuild`, `codebuild:DeleteProject`
+- CloudWatch Logs: `logs:DescribeLogStreams`, `logs:DeleteLogStream`,
+  `logs:DeleteLogGroup`
+- ECR: `ecr:DescribeRepositories`, `ecr:ListTagsForResource`,
+  `ecr:DeleteRepository`
+
+The CLI displays these permissions as information only: it does not run a separate IAM
+preflight or impose an additional role-based command gate. AWS still enforces its
+permissions for each API call and may reject an action if the caller role lacks access.
+
+Ask your AWS administrator to grant these actions in a dedicated policy. Restrict
+resource ARNs to the selected environment, application, EBKit-owned CodeBuild project,
+repository, and log groups/streams wherever each action supports resource-level
+permissions. Some listing and discovery actions require `"Resource": "*"`. Do not grant
+permissions to delete CloudFormation stacks or EKS clusters: EBKit intentionally leaves
+managed cluster deletion to Elastic Beanstalk. With `--keep-artifacts`, only the
+termination permissions above are needed; cleanup permissions are not used.
+
+If configuring least-privilege permissions feels tedious, do not casually attach
+`AdministratorAccess`. It grants broad control over the AWS account, not just EBKit
+resources, and a mistake or compromised credential could affect unrelated workloads.
+Ask an administrator to prepare and approve a scoped role instead. Treat
+`AdministratorAccess` only as an exceptional, explicitly approved, temporary break-glass
+measure, never as a routine or permanent deployment role.
 
 Elastic Beanstalk owns the EKS cluster and its compute infrastructure. It schedules
 cluster deletion **three hours after the last environment on that cluster is terminated**.
