@@ -177,49 +177,10 @@ The source bundle must have the Dockerfile at its root. Do not put an extra pare
 
 ### AWS IAM permissions and roles
 
-Use a dedicated deployment IAM role for `ebkit deploy`. The role assumed by the
-person or automation running EBKit is the **caller role**; it is distinct from the
-service roles below, which AWS services assume. The caller role needs permissions to
-create/use the roles, CodeBuild project, ECR repository, and Elastic Beanstalk resources.
-Scope permissions to the account, region, resource names, and role ARNs wherever AWS
-supports resource-level permissions. A first deployment can fail with `AccessDenied`
-if the caller role cannot create the roles.
-
-EBKit creates or reuses these Cluster Mode **service roles**:
-
-| Role | Trusted service | AWS-managed policies attached by EBKit |
-|---|---|---|
-| `aws-elasticbeanstalk-eks-cluster-role` | `eks.amazonaws.com` | `arn:aws:iam::aws:policy/AmazonEKSClusterPolicy`; `arn:aws:iam::aws:policy/AWSElasticBeanstalkCustomPlatformforEC2Role` |
-| `aws-elasticbeanstalk-eks-node-role` | `ec2.amazonaws.com` | `arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy`; `arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly`; `arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy`; `arn:aws:iam::aws:policy/AWSElasticBeanstalkMulticontainerDocker` |
-| `aws-elasticbeanstalk-eks-observability-role` | `ec2.amazonaws.com` | `arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy` |
-| Repository-specific `ebkit-…-build-role` | `codebuild.amazonaws.com` | EBKit adds the inline policy `EBKitBuildAndPushImage`; see actions below. |
-| `AWSServiceRoleForElasticBeanstalk` | `elasticbeanstalk.amazonaws.com` | AWS-managed service-linked role; EBKit requests its creation if absent. |
-
-The `EBKitBuildAndPushImage` inline policy allows `ecr:GetAuthorizationToken`
-(`Resource: "*"`) and the following actions scoped to the application's ECR repository:
-`ecr:BatchCheckLayerAvailability`, `ecr:CompleteLayerUpload`,
-`ecr:InitiateLayerUpload`, `ecr:PutImage`, and `ecr:UploadLayerPart`. It also permits
-`logs:CreateLogGroup`, `logs:CreateLogStream`, and `logs:PutLogEvents` for that
-CodeBuild project's CloudWatch log group.
-
-The deployment **caller role** needs, at minimum, the IAM setup actions
-`iam:GetRole`, `iam:CreateRole`, `iam:AttachRolePolicy`, `iam:PutRolePolicy`,
-`iam:PassRole`, and `iam:CreateServiceLinkedRole` (the latter only if the
-Elastic Beanstalk service-linked role is absent). It also needs the required
-CodeBuild project/build actions, ECR repository and image actions, Elastic Beanstalk
-application/version/environment actions, and EC2 default VPC/subnet read actions.
-The AWS services assume their own service roles; do not attach those service-role
-policies to the caller role as a substitute for `iam:PassRole`.
-
-Have an AWS administrator review and approve a least-privilege caller role for your
-account. If the service roles already exist, the caller role still needs permission to
-read/use them and pass them to the relevant AWS services. Do not share credentials or
-grant unrestricted administrator access merely to bypass a setup error. If the
-permissions feel tedious, ask an administrator for the scoped role; treat
-`AdministratorAccess` only as an explicitly approved, temporary break-glass measure,
-not a routine or permanent role.
-
-An earlier successful deployment may have used roles that were already present or an AWS identity with broader permissions. A later deployment can still fail if it needs a new role, such as the CodeBuild role for a different repository.
+EBKit uses an operator/caller role plus AWS service roles for Cluster Mode and
+CodeBuild. Review the role names, managed policies, inline build policy, and caller
+permissions in the [AWS IAM guide](docs/aws-iam.md). Use least privilege; do not use
+`AdministratorAccess` as a routine deployment role.
 
 ### Options
 | Option | What it does |
@@ -242,94 +203,22 @@ ebkit deploy --help
 
 ### Environment variables and databases
 
-Provide application settings with a local, gitignored environment file or repeated `--env` options:
+Use a local, gitignored `.env` file or repeated `--env KEY=VALUE` options for
+application runtime settings. EBKit sends them to the running app; it does not
+provision databases or run migrations. Do not commit real environment files.
 
-```powershell
-ebkit deploy https://github.com/owner/project --app my-app --environment my-app-cluster --region us-east-2 --port 5000 --env-file .env.production -y
-```
-
-EBKit sends these values to the Elastic Beanstalk environment; it does not create a database, initialize schemas, or run application-specific migrations. Use a managed database such as Amazon RDS for durable production data, configure its network access securely, and run the migrations documented by your application. Do not commit real environment files or put secrets in Docker build arguments. Review who can view environment settings in AWS.
-
-The `.env` file stays on your computer; **you do not push it to GitHub**. Deploy reads
-the local file and configures its values as application environment variables in AWS.
-CodeBuild gets your code and root Dockerfile from GitHub. These application settings
-are supplied to the deployed container, not to the Docker build.
-
-For Devboard, create or edit `devboard/.env` with your database provider's actual values:
-
-```dotenv
-POSTGRES_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require
-PORT=8080
-```
-
-Use a database endpoint reachable from AWS and the TLS settings required by your
-provider. Replace every placeholder. Other applications may use different variable
-names; init lists detected settings, and `.env.example` documents the expected keys.
-Commit `.env.example` with blank values, and keep `.env` gitignored.
-
-Run deploy from the folder containing `.env`, or specify its path. For example,
-from the parent folder containing the `devboard` checkout:
-
-```powershell
-ebkit deploy https://github.com/Rakesh-Patra/devboard.git --app devboard --environment devboard-cluster --port 8080 --env-file ./devboard/.env
-```
-
-An absolute file path also works. Alternatively, pass settings directly:
-
-```powershell
-ebkit deploy https://github.com/Rakesh-Patra/devboard.git --app devboard --environment devboard-cluster --port 8080 --env "POSTGRES_URL=YOUR_CONNECTION_URL"
-```
-
-Repeat `--env KEY=VALUE` for additional settings. You can combine `--env-file` and
-`--env`; command-line values override matching keys in the file.
+For Devboard-specific connection settings and deployment instructions, see
+[Deploying Devboard](docs/devboard-deployment.md).
 
 ## Generate deployment files with `ebkit init`
 
-By default, `ebkit init` generates a root Dockerfile and deployment files, validates
-them statically, and runs Docker Scout against source dependencies using `fs://`.
-It does **not** build an application image or start a local container. This source
-scan does not verify the packages in a built image. Use `--no-scout` to skip Scout;
-if Scout is unavailable, init reports security validation as unverified.
+Run `ebkit init --path .` to prepare a local project or `ebkit init --repo URL` for
+a public GitHub repository. Init generates or validates deployment files, including
+a root Dockerfile; it does not deploy the app or provision databases. Docker Scout
+scans source dependencies by default; local build/runtime verification is optional.
 
-If the source security gate fails, deployment files remain generated, but readiness
-is blocked. Init lists affected packages, manifest paths, and Scout's reported fixed
-versions. Update dependencies and lockfiles, test compatibility, and rerun init;
-regenerating the Dockerfile does not fix source dependency CVEs. Some findings have
-no available fix. `--no-scout` remains an explicit option to skip scanning; it does
-not fix vulnerabilities.
-
-Local image verification is optional: request it with `ebkit init --build`.
-Interactive init also asks `Build the Docker image locally? [y/N]` after artifact validation.
-Press Enter to skip. `--no-build` skips this prompt, and `--yes` skips building unless
-you explicitly pass `--build` or `--runtime`.
-`--runtime` also explicitly requests a local build and runtime verification.
-`--scout` alone scans source dependencies and never triggers a build.
-
-Use the initializer if your project needs a Dockerfile or other deployment files. Get a Gemini API key from Google AI Studio and set it in your terminal before running the wizard.
-
-**Windows PowerShell:**
-
-```powershell
-$env:GEMINI_API_KEY = "your-key"
-ebkit init
-```
-
-**macOS/Linux:**
-
-```bash
-export GEMINI_API_KEY="your-key"
-ebkit init
-```
-
-The wizard scans a local project or a public GitHub repository and generates or validates the deployment files, including one root-level `Dockerfile`. For a GitHub source, use:
-
-```powershell
-ebkit init --repo https://github.com/owner/project
-```
-
-EBKit clones into a folder named `project` in the current directory and retains that clone after init completes. If that folder already exists, init stops without overwriting it. Multi-tier projects are scanned and EBKit asks Docker AI (Gordon) to generate one root-level Dockerfile; if Gordon is unavailable or returns an invalid result, Gemini is used as a fallback. Gemini receives scan metadata and manifest paths, not source or manifest contents; `.env` values are not sent. Generation is best-effort: inspect the Dockerfile, verify it builds and serves every required tier, and run the generated app locally before deploying. EBKit's static validation cannot prove that arbitrary services work together at runtime.
-
-Compose databases, Redis, and other detected stateful dependencies are not bundled into the application container, and `ebkit init` does not provision managed services. Init reports these services, adds detected connection-variable names (never values) to `.env.example`, and creates or safely updates a local `.env` with blank missing settings. It also ensures `.env` is ignored by Git and prints a ready-to-edit `ebkit deploy ... --env-file .env` command. Existing `.env` values are preserved and never printed. Provision the required managed database/cache/broker separately, configure its network access, and fill in the connection values locally before deploying. Alternatively, pass individual values with repeated `--env KEY=VALUE` options. Never commit the real `.env` file. Then commit and push the application and root Dockerfile to GitHub before running the printed deploy command.
+See the [init guide](docs/initialization.md) for AI provider setup, validation
+behavior, security scanning, and build options.
 
 ## Inspect and manage deployments
 
@@ -366,61 +255,15 @@ deploy receive ownership tags. Cleanup requires the corresponding AWS delete per
 
 ### IAM permissions for `destroy`
 
-Run `destroy` using a dedicated operator IAM role (for example, an AWS IAM Identity
-Center role). This is the operator/caller role, not one of the EBKit service roles.
-`destroy` does not create or assume an EBKit service role; the Elastic Beanstalk
-service manages termination of its environment and EKS cluster. The caller role needs
-these actions for termination:
+The destroy operator role needs environment describe/terminate actions. Optional
+artifact cleanup also needs the applicable Elastic Beanstalk, CodeBuild, CloudWatch
+Logs, and ECR actions. See the [AWS IAM guide](docs/aws-iam.md) for complete action
+lists, scoping guidance, and the `AdministratorAccess` warning.
 
-- `elasticbeanstalk:DescribeEnvironments`
-- `elasticbeanstalk:DescribeEnvironmentResources`
-- `elasticbeanstalk:TerminateEnvironment`
-
-EBKit calls `sts:GetCallerIdentity` to determine the AWS account, but AWS does not
-require an explicit allow for that action.
-
-Unless `--keep-artifacts` is specified, the same caller identity also needs these
-actions for the optional post-termination cleanup:
-
-- Elastic Beanstalk: `elasticbeanstalk:DescribeApplications`,
-  `elasticbeanstalk:DeleteApplication`
-- CodeBuild: `codebuild:BatchGetProjects`, `codebuild:ListBuildsForProject`,
-  `codebuild:BatchGetBuilds`, `codebuild:StopBuild`, `codebuild:DeleteProject`
-- CloudWatch Logs: `logs:DescribeLogStreams`, `logs:DeleteLogStream`,
-  `logs:DeleteLogGroup`
-- ECR: `ecr:DescribeRepositories`, `ecr:ListTagsForResource`,
-  `ecr:DeleteRepository`
-
-The CLI displays these permissions as information only: it does not run a separate IAM
-preflight or impose an additional role-based command gate. AWS still enforces its
-permissions for each API call and may reject an action if the caller role lacks access.
-
-Ask your AWS administrator to grant these actions in a dedicated policy. Restrict
-resource ARNs to the selected environment, application, EBKit-owned CodeBuild project,
-repository, and log groups/streams wherever each action supports resource-level
-permissions. Some listing and discovery actions require `"Resource": "*"`. Do not grant
-permissions to delete CloudFormation stacks or EKS clusters: EBKit intentionally leaves
-managed cluster deletion to Elastic Beanstalk. With `--keep-artifacts`, only the
-termination permissions above are needed; cleanup permissions are not used.
-
-If configuring least-privilege permissions feels tedious, do not casually attach
-`AdministratorAccess`. It grants broad control over the AWS account, not just EBKit
-resources, and a mistake or compromised credential could affect unrelated workloads.
-Ask an administrator to prepare and approve a scoped role instead. Treat
-`AdministratorAccess` only as an exceptional, explicitly approved, temporary break-glass
-measure, never as a routine or permanent deployment role.
-
-Elastic Beanstalk owns the EKS cluster and its compute infrastructure. It schedules
-cluster deletion **three hours after the last environment on that cluster is terminated**.
-Other environments or a new deployment can keep that cluster active, and charges
-continue until deletion completes. EBKit records the cluster ARN and prints the
-read-only CloudFormation verification command. It does not manually delete the
-service-managed cluster or stack. See [AWS cluster deletion documentation](https://docs.aws.amazon.com/elasticbeanstalk/latest/dg/beanstalk-cluster-concepts.html#beanstalk-cluster-concepts-deletion).
-
-If termination times out or cleanup fails, destroy exits with an error and reports
-pending cleanup rather than claiming that all charges have stopped. You can retry
-cleanup for a recently terminated environment. Use `--keep-artifacts` to request only
-termination and preserve images, build projects and logs.
+Elastic Beanstalk schedules managed EKS cluster deletion three hours after its last
+environment terminates. EBKit does not manually delete the cluster or stack; use
+`cleanup-status` to inspect recorded cleanup. If termination times out, artifact
+cleanup does not run. `--keep-artifacts` skips artifact cleanup.
 
 ## Manage the application from your terminal
 
@@ -475,7 +318,10 @@ throughout your AWS account.
 
 ### AWS credentials or permissions
 
-Run `aws sts get-caller-identity` and confirm you are using the intended account. If access is denied, note the denied action and resource, then ask your AWS administrator to review the [IAM permissions and roles](#aws-iam-permissions-and-roles) needed for Elastic Beanstalk Cluster Mode, CodeBuild, ECR, and the target network. An `iam:CreateRole` denial occurs during provisioning; retrying unchanged credentials will not resolve it.
+Run `aws sts get-caller-identity` and confirm you are using the intended account. If
+access is denied, note the denied action and resource, then ask your AWS administrator
+to review the [AWS IAM guide](docs/aws-iam.md). An `iam:CreateRole` denial during
+provisioning cannot be fixed by retrying with unchanged permissions.
 
 ### Build or deployment failed
 
@@ -492,18 +338,9 @@ Replace the application, environment, and region with yours. A deployment is rea
 
 EBKit uses the AWS CLI to register Cluster image versions when the installed Boto3 version does not support that API shape. Install or update to the current AWS CLI v2 using the [official installation guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), open a new terminal, and verify with `aws --version`.
 
-## For contributors
+## Contributing
 
-Clone the repository, install development dependencies, and run the tests:
-
-```powershell
-git clone https://github.com/Rakesh-Patra/ebready.git
-cd ebready
-py -m pip install -e ".[dev]"
-py -m pytest
-```
-
-On macOS/Linux, use `python3` in place of `py`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and pull request guidance.
 
 ## Current limitations
 
