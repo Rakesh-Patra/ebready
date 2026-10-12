@@ -107,3 +107,42 @@ footer{font-size:11px;color:var(--copy)}
 .source-tabs { margin-bottom:20px; }
 
 .pricing-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}.pricing-card{padding:32px}.pricing-card .price{font-size:42px;display:block;margin:24px 0}.trial-countdown{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}.trial-countdown.expired{color:#d97706}@media(max-width:700px){.pricing-grid{grid-template-columns:1fr}}
+
+/* Keep controls reachable and content contained on phones and short viewports. */
+.mobile-signout{display:none}
+@media(max-width:760px){
+  .sidebar nav{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
+  .nav-item{min-width:0;min-height:44px;white-space:normal}
+  .mobile-signout{display:grid}
+  .button,.button.small,.icon-button,.tabs button,.text-button{min-height:44px}
+  .icon-button{min-width:44px}
+  .topbar{height:auto}
+  .topbar>div{flex-basis:100%;min-width:0}
+  .topbar .button{white-space:normal}
+  .modal{min-width:0;width:100%;scroll-padding-block:16px}
+  .modal :is(input:not([type=checkbox]):not([type=file]),select,textarea){font-size:16px}
+  .checkbox{min-height:44px;align-items:center}
+  .checkbox input{width:18px;height:18px;flex-shrink:0}
+  .modal-actions{flex-wrap:wrap}
+  .modal-actions .button{flex:1;white-space:normal}
+  .repo-link,.variable-list code,.detected-settings code,.zip-upload small{overflow-wrap:anywhere}
+  .variable-list>div{flex-wrap:wrap}
+  .zip-upload{padding:18px;min-width:0}
+  .zip-upload input{width:100%;min-width:0}
+  .dockerfile-review pre,.cli-page pre{max-width:100%;min-width:0}
+  .pricing-card{min-width:0;padding:24px}
+  .trial-countdown{overflow-wrap:anywhere}
+}
+@media(max-width:480px){
+  .sidebar nav{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .stats>div{min-width:0}
+  .stats>div:last-child{grid-column:1/-1}
+  .empty-state{padding-inline:16px}
+  .empty-state .button{max-width:100%;white-space:normal}
+  .overlay{padding:10px}
+  .modal{padding:20px;max-height:calc(100dvh - 20px)}
+  .modal.auth-modal{max-height:calc(100dvh - 20px)}
+  .auth-body{padding:20px}
+  .tabs{gap:18px}
+}

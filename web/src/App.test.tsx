@@ -239,3 +239,12 @@ it('shows the 30-minute approved trial and the Rs49 coming-soon pass without che
  expect((screen.getByRole('button',{name:'Coming soon'}) as HTMLButtonElement).disabled).toBe(true);
  expect(api.backend).not.toHaveBeenCalled();
 });
+
+it('provides a header sign-out control for the mobile layout',async()=>{
+ api.auth.getCurrentUser.mockResolvedValue({data:{user:{id:'owner',email:'owner@example.test'}},error:null});
+ api.auth.signOut.mockResolvedValue({error:null});
+ api.database.from.mockReturnValue({select:()=>({order:()=>({limit:async()=>({data:[],error:null})})})});
+ render(<App/>);await screen.findByText('Signed in');
+ await userEvent.click(screen.getByRole('button',{name:'Sign out of account'}));
+ expect(api.auth.signOut).toHaveBeenCalledOnce();expect(await screen.findByRole('button',{name:'Log in'})).toBeTruthy();
+});
