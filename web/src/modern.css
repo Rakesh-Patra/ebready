@@ -146,3 +146,5 @@ footer{font-size:11px;color:var(--copy)}
   .auth-body{padding:20px}
   .tabs{gap:18px}
 }
+
+.inline-help{margin:0 0 18px;font-size:12px;color:var(--copy)}.inline-help summary,.detected-settings summary{cursor:pointer;font-weight:500;min-height:28px}.inline-help p{font-size:12px;line-height:1.7;margin:8px 0}.detected-settings[open]{padding-bottom:16px}@media(max-width:760px){.inline-help summary,.detected-settings summary{min-height:44px;align-content:center}}

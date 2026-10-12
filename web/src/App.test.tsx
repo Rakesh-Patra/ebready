@@ -94,7 +94,7 @@ describe('deployment dashboard', () => {
   it('creates a guest preview and requires its name to delete it', async () => {
     const user = await wizard();
     await user.click(screen.getByRole('button', { name: /Start demo deployment/ }));
-    expect(screen.getByRole('dialog').textContent).toMatch(/simulated preview/);
+    expect(screen.getByRole('dialog').textContent).toMatch(/simulated preview/i);
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(screen.getByRole('button', { name: 'Delete' }));
     const dialog = screen.getByRole('dialog', { name: 'Delete devboard?' });
