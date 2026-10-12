@@ -375,3 +375,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and pull 
 - Deployment accepts public GitHub repositories and reviewed project ZIPs with a root-level Dockerfile. Local directories, prebuilt image tags, and Compose deployments are not supported.
 - The application image should not bundle a local database for production. Use a managed database service; application-specific migrations and rollback are not automated.
 - Gemini is the only active AI provider for `ebkit init`.
+
+### Website trial access
+
+Hosted website deployments offer one operator-approved 30-minute free trial per account, one replica, a persistent countdown and automatic cleanup. The timer starts at Ready/Green and is not extended by redeployment. Provisioning is limited to 30 minutes. Global deployment slots default to two, including trials awaiting verified cleanup. The **Rs49 two-hour pass is Coming soon**; no payment checkout is enabled. See `web/README.md` for scheduler operation and cleanup limitations. Local CLI deployments in your own AWS account are not time-limited by this website trial policy.
+
+Use `ebkit deploy SOURCE --max-replicas 1` to explicitly cap autoscaling; the hosted free trial sets this automatically. Without this option, new CLI environments default to a maximum of five replicas and redeploy preserves existing bounds.

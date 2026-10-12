@@ -467,7 +467,7 @@ def _ensure_eb_application(eb_client, app_name: str) -> None:
 
 
 def _build_cluster_option_settings(
-    infra: Dict, env_vars: Dict[str, str], port: int
+    infra: Dict, env_vars: Dict[str, str], port: int, max_replicas: int = 5
 ) -> List[Dict]:
     options = [
         {"Namespace": "aws:elasticbeanstalk:eks", "OptionName": "cluster-role", "Value": infra["cluster_role"]},
@@ -482,7 +482,7 @@ def _build_cluster_option_settings(
         {"Namespace": "aws:elasticbeanstalk:eks:environment", "OptionName": "load-balancer-type", "Value": "ALB"},
         {"Namespace": "aws:elasticbeanstalk:eks:alb", "OptionName": "scheme", "Value": "internet-facing"},
         {"Namespace": "aws:elasticbeanstalk:eks:environment:autoscaling", "OptionName": "min-replica", "Value": "1"},
-        {"Namespace": "aws:elasticbeanstalk:eks:environment:autoscaling", "OptionName": "max-replica", "Value": "5"},
+        {"Namespace": "aws:elasticbeanstalk:eks:environment:autoscaling", "OptionName": "max-replica", "Value": str(max_replicas)},
     ]
     if infra.get("subnets"):
         options.append({
@@ -500,7 +500,7 @@ def _build_cluster_option_settings(
     return options
 
 
-def _existing_environment_update_options(eb_client, app_name, env_name, env_vars, port):
+def _existing_environment_update_options(eb_client, app_name, env_name, env_vars, port, max_replicas=None):
     """Preserve existing settings and replica bounds when deploying a new image."""
     configurations = eb_client.describe_configuration_settings(
         ApplicationName=app_name, EnvironmentName=env_name
@@ -518,7 +518,7 @@ def _existing_environment_update_options(eb_client, app_name, env_name, env_vars
                 raise RuntimeError("Existing environment settings are invalid; no values were printed.") from None
     existing.update(env_vars)
     existing["PORT"] = str(port)
-    return [
+    return ([{"Namespace":"aws:elasticbeanstalk:eks:environment:autoscaling","OptionName":"min-replica","Value":"1"},{"Namespace":"aws:elasticbeanstalk:eks:environment:autoscaling","OptionName":"max-replica","Value":str(max_replicas)}] if max_replicas is not None else []) + [
         {"Namespace": "aws:elasticbeanstalk:eks:environment", "OptionName": "service-port", "Value": str(port)},
         {"Namespace": "aws:elasticbeanstalk:eks:environment", "OptionName": "env-variables", "Value": json.dumps(existing)},
     ]
@@ -532,6 +532,7 @@ def _ensure_cluster_environment(
     infra: Dict,
     env_vars: Dict[str, str],
     port: int,
+    max_replicas: Optional[int] = None,
 ) -> bool:
     environments = eb_client.describe_environments(
         ApplicationName=app_name, EnvironmentNames=[env_name], IncludeDeleted=False
@@ -544,7 +545,7 @@ def _ensure_cluster_environment(
         EnvironmentName=env_name,
         VersionLabel=version_label,
         Tier={"Name": "Cluster", "Type": "EKS"},
-        OptionSettings=_build_cluster_option_settings(infra, env_vars, port),
+        OptionSettings=_build_cluster_option_settings(infra, env_vars, port, max_replicas or 5),
     )
     _ok(f"Cluster environment '{env_name}' launched.")
     return True
@@ -637,6 +638,7 @@ def _execute_deploy(
     extra_env: Tuple[str, ...],
     is_interactive: bool,
     archive_path: Optional[str] = None,
+    max_replicas: Optional[int] = None,
 ) -> Dict:
     config = load_config()
     parsed = urlsplit(source_url)
@@ -734,13 +736,13 @@ def _execute_deploy(
     deployment["status"] = "DEPLOYING"
     _persist_deployment(deployment)
     created = _ensure_cluster_environment(
-        eb, app, env, version_label, infra, env_vars, port
+        eb, app, env, version_label, infra, env_vars, port, max_replicas
     )
     if not created:
         eb.update_environment(
             EnvironmentName=env,
             VersionLabel=version_label,
-            OptionSettings=_existing_environment_update_options(eb, app, env, env_vars, port),
+            OptionSettings=_existing_environment_update_options(eb, app, env, env_vars, port, max_replicas),
         )
         _ok(f"Deployment update started for '{env}'.")
 
@@ -776,12 +778,13 @@ def _execute_deploy(
 @click.option("--environment", "--env-name", "environment_name", help="Elastic Beanstalk environment name")
 @click.option("--region", help="AWS region (for example, us-east-2)")
 @click.option("--port", default=8080, show_default=True, type=click.IntRange(1, 65535), help="Port the container listens on")
+@click.option("--max-replicas", type=click.IntRange(1,100), help="Set autoscaling maximum (new environments default to 5; updates preserve bounds unless set).")
 @click.option("--wait/--no-wait", default=True, help="Wait for the environment to become ready")
 @click.option("--env-file", help="Local file containing application environment variables")
 @click.option("--env", "extra_env", multiple=True, metavar="KEY=VALUE", help="Application environment variable")
 @click.option("-y", "--yes", is_flag=True, help="Skip the deployment confirmation")
 @click.option('--reviewed', is_flag=True, help='Confirm that you reviewed the root Dockerfile in this ZIP.')
-def deploy(source, app, environment_name, region, port, wait, env_file, extra_env, yes, reviewed=False):
+def deploy(source, app, environment_name, region, port, wait, env_file, extra_env, yes, reviewed=False, max_replicas=None):
     """Deploy a GitHub URL or a reviewed local project ZIP using AWS CodeBuild."""
     source = source.strip()
     if Path(source).is_file() and source.lower().endswith('.zip'):
@@ -800,7 +803,7 @@ def deploy(source, app, environment_name, region, port, wait, env_file, extra_en
                     if not click.confirm('I reviewed this Dockerfile. Continue?',default=False): raise click.Abort()
                 prepared = make_zip(root,Path(directory)/'source.zip')
                 archive_name = re.sub(r'[^a-z0-9-]', '-', Path(source).stem.lower()).strip('-') or 'zip-app'
-                _execute_deploy(source_url=f'zip://source/{archive_name}',app=app,env=environment_name,region=region,port=port,wait=wait,env_file=env_file,extra_env=extra_env,is_interactive=not yes and sys.stdin.isatty(),archive_path=str(prepared))
+                _execute_deploy(source_url=f'zip://source/{archive_name}',app=app,env=environment_name,region=region,port=port,wait=wait,env_file=env_file,extra_env=extra_env,is_interactive=not yes and sys.stdin.isatty(),archive_path=str(prepared),**({'max_replicas':max_replicas} if max_replicas is not None else {}))
                 return
         except (ValueError, OSError, zipfile.BadZipFile, BotoCoreError, ClientError, RuntimeError, TimeoutError) as error:
             raise click.ClickException(str(error)) from None
@@ -820,6 +823,7 @@ def deploy(source, app, environment_name, region, port, wait, env_file, extra_en
             env_file=env_file,
             extra_env=extra_env,
             is_interactive=not yes and sys.stdin.isatty(),
+            **({'max_replicas':max_replicas} if max_replicas is not None else {}),
         )
     except (BotoCoreError, ClientError, RuntimeError, TimeoutError) as exc:
         raise click.ClickException(str(exc)) from exc

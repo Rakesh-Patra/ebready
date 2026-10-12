@@ -172,8 +172,9 @@ def rollback_command(app, environment_name, region, version, yes):
 
 @click.command("cleanup-status")
 @target_options
+@click.option("--json", "as_json", is_flag=True, help="Print structured cleanup verification.")
 @aws_errors
-def cleanup_status_command(app, environment_name, region):
+def cleanup_status_command(app, environment_name, region, as_json=False):
     """Check recorded managed cluster deletion after destroy (read-only)."""
     selected_region = ops._region_option(region)
     session, account = ops._aws_session(selected_region)
@@ -181,10 +182,17 @@ def cleanup_status_command(app, environment_name, region):
     if not records:
         raise click.ClickException("No matching local deployment record; specify --app/--environment for a recorded deployment.")
     record = records[-1]
-    click.echo(f"Environment: {record.get('environment_name')}")
-    click.echo(f"Last recorded cleanup: {record.get('artifact_cleanup', 'Not recorded')}")
+    report = {"environment": record.get("environment_name"), "artifact_cleanup": record.get("artifact_cleanup"), "cleanup_complete": False}
+    if not as_json:
+        click.echo(f"Environment: {record.get('environment_name')}")
+        click.echo(f"Last recorded cleanup: {record.get('artifact_cleanup', 'Not recorded')}")
     cluster = record.get("cluster_arn")
     if not cluster:
+        if as_json:
+            report["cleanup_complete"] = record.get("no_cluster_created") is True and record.get("artifact_cleanup") == "Completed eligible cleanup"
+            report["reason"] = "No cluster was provisioned." if report["cleanup_complete"] else "No cluster ARN recorded; managed cleanup cannot be verified."
+            click.echo(json.dumps(report))
+            return
         raise click.ClickException("No cluster ARN recorded. Destroy records it before termination.")
     name = cluster.rsplit("/", 1)[-1]
     try:
@@ -192,10 +200,18 @@ def cleanup_status_command(app, environment_name, region):
     except ClientError as exc:
         error = exc.response.get("Error", {})
         if error.get("Code") == "ValidationError" and "does not exist" in error.get("Message", ""):
+            if as_json:
+                report.update(cluster_deleted=True,cleanup_complete=record.get("artifact_cleanup")=="Completed eligible cleanup")
+                click.echo(json.dumps(report))
+                return
             click.echo("Managed cluster stack deleted.")
             return
         raise
     state = stacks[0].get("StackStatus", "Unknown") if stacks else "Unknown"
+    if as_json:
+        report.update(cluster_status=state,cluster_deleted=state=="DELETE_COMPLETE",cleanup_complete=state=="DELETE_COMPLETE" and record.get("artifact_cleanup")=="Completed eligible cleanup")
+        click.echo(json.dumps(report))
+        return
     click.echo(f"Managed cluster stack: {name} [{state}]")
     if state != "DELETE_COMPLETE":
         click.echo("Cluster cleanup is not complete. Charges may continue; another environment may be using the cluster.")

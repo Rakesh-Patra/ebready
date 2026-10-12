@@ -95,7 +95,7 @@ it('rejects dangerous Dockerfile secret copies and invalid AI output',()=> {
 });
 it('authenticates ZIP upload before inspecting it and refuses client-supplied local paths',async()=> {
   const root=await mkdtemp(path.join(tmpdir(),'ebkit-upload-api-'));directories.push(root);const inspectZip=vi.fn(),spawn=vi.fn();
-  const server=await createWorker({liveEnabled:true,jobRoot:root,allowedEmails:['owner@example.test'],origins:[]},{admin:{},recover:false,inspectZip,spawn,authenticate:async()=>({id:'other',email:'other@example.test'})});
+  const server=await createWorker({trialsEnabled:false,liveEnabled:true,jobRoot:root,allowedEmails:['owner@example.test'],origins:[]},{admin:{},recover:false,inspectZip,spawn,authenticate:async()=>({id:'other',email:'other@example.test'})});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));servers.push(server);const url=`http://127.0.0.1:${server.address().port}`;
   expect((await fetch(url+'/api/uploads',{method:'POST',headers:{'Content-Type':'application/zip'},body:'zip'})).status).toBe(401);
   expect((await fetch(url+'/api/uploads',{method:'POST',headers:{'Content-Type':'application/zip',Authorization:'Bearer test'},body:'zip'})).status).toBe(403);
@@ -109,7 +109,7 @@ it('hands a reviewed ZIP to the CLI without GitHub calls and reuses its owned sn
   }}};
   const launch=vi.fn(()=>{const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.stderr=new PassThrough();child.kill=vi.fn();children.push(child);return child;});
   const python=process.env.EBKIT_TEST_PYTHON||(process.platform==='win32'?fileURLToPath(new URL('../../.venv/Scripts/python.exe',import.meta.url)):'python3');
-  const server=await createWorker({liveEnabled:true,jobRoot:fixture.root,python,allowedEmails:[user.email],origins:[]},{admin,recover:false,spawn:launch,authenticate:async()=>user,inspectZip:fixture.inspectZip,fetch:github,sourceScout:fixture.sourceScout});
+  const server=await createWorker({trialsEnabled:false,liveEnabled:true,jobRoot:fixture.root,python,allowedEmails:[user.email],origins:[]},{admin,recover:false,spawn:launch,authenticate:async()=>user,inspectZip:fixture.inspectZip,fetch:github,sourceScout:fixture.sourceScout});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));servers.push(server);const url=`http://127.0.0.1:${server.address().port}`;
   const post=(route,body)=>fetch(url+route,{method:'POST',headers:{Authorization:'Bearer test','Content-Type':'application/json'},body:JSON.stringify(body)});
   const uploaded=await (await fetch(url+'/api/uploads',{method:'POST',headers:{Authorization:'Bearer test','Content-Type':'application/zip','x-ebkit-filename':'project.zip'},body:'mock zip'})).json();

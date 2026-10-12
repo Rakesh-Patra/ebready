@@ -14,8 +14,10 @@ const config = {
   origins: (process.env.EBKIT_WEB_ORIGINS || 'http://127.0.0.1:5173,http://localhost:5173').split(','),
   ...(process.env.EBKIT_JOBS_DIR ? { jobRoot: path.resolve(process.env.EBKIT_JOBS_DIR) } : {}),
   geminiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
+  globalCapacity:Number(process.env.EBKIT_GLOBAL_CAPACITY||2),
   geminiModel: process.env.EBKIT_GEMINI_MODEL || 'gemini-2.5-flash',
 };
+if(!Number.isInteger(config.globalCapacity)||config.globalCapacity<1||config.globalCapacity>10)throw new Error('EBKIT_GLOBAL_CAPACITY must be between 1 and 10.');
 // Check the listener before recovery changes database flags (including during an upgrade).
 try {
   await new Promise((resolve, reject) => {

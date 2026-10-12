@@ -558,8 +558,11 @@ def destroy_command(
     eb = session.client("elasticbeanstalk")
     try:
         current = eb.describe_environments(EnvironmentNames=[env_name], IncludeDeleted=True).get("Environments", [])
-        already_terminated = bool(current) and all(item.get("Status") == "Terminated" for item in current)
+        already_terminated = not current or all(item.get("Status") == "Terminated" for item in current)
         cluster_arn = deployment.get("cluster_arn")
+        if not current and not cluster_arn and deployment.get("status") in ("BUILDING", "BUILD_SUCCEEDED"):
+            # The persisted build stage precedes any cluster provisioning in deploy.
+            deployment["no_cluster_created"] = True
         if not already_terminated:
             resources = environment_resources(eb, env_name, selected_region)
             cluster_arn = resources.get("Cluster", {}).get("ClusterArn") or resources.get("Cluster", {}).get("Name")
@@ -590,7 +593,7 @@ def destroy_command(
     try:
         while True:
             environments = eb.describe_environments(EnvironmentNames=[env_name], IncludeDeleted=True).get("Environments", [])
-            if environments and all(item.get("Status") == "Terminated" for item in environments):
+            if (not environments and already_terminated) or (environments and all(item.get("Status") == "Terminated" for item in environments)):
                 break
             if time.monotonic() - started >= timeout:
                 raise click.ClickException("Environment termination is still pending. Artifact cleanup was not run; "

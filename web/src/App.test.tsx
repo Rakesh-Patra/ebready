@@ -5,14 +5,14 @@ import userEvent from '@testing-library/user-event';
 const api = vi.hoisted(() => ({
   auth: { getCurrentUser: vi.fn(), onAuthStateChange: vi.fn((_callback: (event: string) => void) => () => {}), signInWithOAuth: vi.fn(), signOut: vi.fn() },
   database: { from: vi.fn() },
-  backend: vi.fn(),
+  backend: vi.fn(), getTrialAccount:vi.fn(),
   uploadZip: vi.fn(), downloadPreparedZip: vi.fn(),
 }));
-vi.mock('./lib', async original => ({ ...await original<typeof import('./lib')>(), insforge: api, backend: api.backend, uploadZip:api.uploadZip, downloadPreparedZip:api.downloadPreparedZip }));
+vi.mock('./lib', async original => ({ ...await original<typeof import('./lib')>(), insforge: api, backend: api.backend, getTrialAccount:api.getTrialAccount, uploadZip:api.uploadZip, downloadPreparedZip:api.downloadPreparedZip }));
 vi.mock('@insforge/sdk', () => ({ createClient: () => ({}), AuthChangeEvent: { SIGNED_OUT: 'signedOut' } }));
 import App from './App';
 
-beforeEach(() => { vi.clearAllMocks(); vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ json: async () => ({ liveEnabled: true }) })); api.backend.mockResolvedValue({ dockerfile: 'Dockerfile' }); api.auth.getCurrentUser.mockResolvedValue({ data: { user: null }, error: null }); });
+beforeEach(() => { vi.clearAllMocks();api.getTrialAccount.mockResolvedValue({approved:true,trialUsed:false,durationMinutes:30}); vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ json: async () => ({ liveEnabled: true }) })); api.backend.mockResolvedValue({ dockerfile: 'Dockerfile' }); api.auth.getCurrentUser.mockResolvedValue({ data: { user: null }, error: null }); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 async function wizard() {
   const user = userEvent.setup(); render(<App/>);
@@ -57,13 +57,13 @@ describe('deployment dashboard', () => {
     await user.click(screen.getByRole('button', { name: /New deployment/ }));
     await user.type(screen.getByLabelText('GitHub repository URL'), 'https://github.com/owner/repository'); await user.click(screen.getByRole('checkbox'));
     await user.click(screen.getByRole('button', { name: /Check repository & continue/ }));
-    expect(screen.queryByRole('button', { name: 'Deploy to AWS' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Log in to start trial' })).toBeNull();
     await user.click(screen.getByRole('checkbox', { name: /billable AWS resources/ }));
-    expect(screen.getByRole('button', { name: 'Deploy to AWS' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Log in to start trial' })).toBeTruthy();
     await user.click(screen.getByRole('checkbox', { name: /billable AWS resources/ }));
-    expect(screen.queryByRole('button', { name: 'Deploy to AWS' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Log in to start trial' })).toBeNull();
     await user.click(screen.getByRole('checkbox', { name: /billable AWS resources/ }));
-    await user.click(screen.getByRole('button', { name: 'Deploy to AWS' }));
+    await user.click(screen.getByRole('button', { name: 'Log in to start trial' }));
     expect(screen.getByRole('dialog', { name: 'Welcome back.' })).toBeTruthy();
     expect(api.backend.mock.calls.map(call => call[0])).toEqual(['/api/repository']);
   });
@@ -77,11 +77,11 @@ describe('deployment dashboard', () => {
     const input=screen.getByRole('textbox',{name:/Application environment/});
     expect((input as HTMLTextAreaElement).value).toBe('POSTGRES_URL=');
     await user.click(screen.getByRole('checkbox',{name:/billable AWS resources/}));
-    expect(screen.queryByRole('button',{name:'Deploy to AWS'})).toBeNull();
+    expect(screen.queryByRole('button',{name:'Log in to start trial'})).toBeNull();
     await user.type(input,'postgresql://user:password@host/database');
-    expect(screen.getByRole('button',{name:'Deploy to AWS'})).toBeTruthy();
+    expect(screen.getByRole('button',{name:'Log in to start trial'})).toBeTruthy();
     await user.clear(input);
-    expect(screen.queryByRole('button',{name:'Deploy to AWS'})).toBeNull();
+    expect(screen.queryByRole('button',{name:'Log in to start trial'})).toBeNull();
     expect(api.backend).toHaveBeenCalledTimes(1);
   });
   it('rejects real secret values entered in the name-only field', async () => {
@@ -231,4 +231,11 @@ it('ZIP wizard requires Dockerfile review and environment values before enabling
   await user.type(screen.getByRole('textbox',{name:/Application environment/}),'DATABASE_URL=postgresql://database.example/app');
   expect(screen.getByRole('button',{name:'Deploy to AWS'})).toBeTruthy();
   expect(api.backend).toHaveBeenCalledWith('/api/uploads/zip-one/prepare',{port:3000,allowAI:true});
+});
+
+it('shows the 30-minute approved trial and the Rs49 coming-soon pass without checkout',async()=>{
+ render(<App/>);await userEvent.click(screen.getByRole('button',{name:'Pricing'}));
+ expect(screen.getByText('30 minutes from Ready / Green.')).toBeTruthy();expect(screen.getByText(String.fromCharCode(8377)+'49')).toBeTruthy();
+ expect((screen.getByRole('button',{name:'Coming soon'}) as HTMLButtonElement).disabled).toBe(true);
+ expect(api.backend).not.toHaveBeenCalled();
 });

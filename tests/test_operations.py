@@ -336,3 +336,18 @@ def test_latest_build_lookup_uses_supported_codebuild_parameters():
         stub.add_response("list_builds_for_project", {}, {"projectName": "project", "sortOrder": "DESCENDING"})
         assert _get_build(session, {"codebuild_project": "project"}) is None
         stub.assert_no_pending_responses()
+
+def test_destroy_cleans_failed_build_before_an_environment_exists(monkeypatch,tmp_path):
+    eb=MagicMock();eb.describe_environments.return_value={'Environments':[]}
+    session=MagicMock();session.client.return_value=eb
+    monkeypatch.setenv('EBKIT_STATE_FILE',str(tmp_path/'state.json'))
+    monkeypatch.setattr('ebkit.commands.operations._aws_session',lambda _:(session,'account'))
+    monkeypatch.setattr('ebkit.commands.operations._resolve_deployment',lambda *args:('demo','demo-cluster',{'status':'BUILDING','codebuild_project':'owned-build'}))
+    cleanup=MagicMock(return_value=['Stopped owned build and removed artifacts'])
+    monkeypatch.setattr('ebkit.commands.operations.cleanup_application_artifacts',cleanup)
+    monkeypatch.setattr('ebkit.commands.operations.cleanup_environment_logs',MagicMock(return_value=[]))
+    result=CliRunner().invoke(destroy_command,[],input='demo-cluster\n')
+    assert result.exit_code==0,result.output
+    eb.terminate_environment.assert_not_called();cleanup.assert_called_once()
+    record=json.loads((tmp_path/'state.json').read_text())['deployments'][0]
+    assert record['no_cluster_created'] is True and record['artifact_cleanup']=='Completed eligible cleanup'

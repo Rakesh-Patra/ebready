@@ -3,8 +3,8 @@ export const insforge = createClient({
   baseUrl: import.meta.env.VITE_INSFORGE_URL,
   anonKey: import.meta.env.VITE_INSFORGE_ANON_KEY,
 });
-export type Project = { id: string; user_id: string; name: string; repository: string; region: string; port: number; status: string; stage: number; replicas: number; revision: number; variable_names: string[]; created_at: string; mode?: 'demo' | 'live'; application_name?: string; environment_name?: string; live_url?: string; health?: string; last_error?: string; operation_log?: string; last_operation?: string; operation_running?: boolean };
-export const columns = 'id,user_id,name,repository,region,port,status,stage,replicas,revision,variable_names,created_at,mode,application_name,environment_name,live_url,health,last_error,operation_log,last_operation,operation_running';
+export type Project = { id: string; user_id: string; name: string; repository: string; region: string; port: number; status: string; stage: number; replicas: number; revision: number; variable_names: string[]; created_at: string; plan?:'free_trial';trial_started_at?:string;trial_expires_at?:string;trial_cleanup_state?:string; mode?: 'demo' | 'live'; application_name?: string; environment_name?: string; live_url?: string; health?: string; last_error?: string; operation_log?: string; last_operation?: string; operation_running?: boolean };
+export const columns = 'id,user_id,name,repository,region,port,status,stage,replicas,revision,variable_names,created_at,mode,application_name,environment_name,live_url,health,last_error,operation_log,last_operation,operation_running,plan,trial_started_at,trial_expires_at,trial_cleanup_state';
 export async function backend<T>(route: string, body: unknown): Promise<T> {
   const token = route === '/api/repository' ? null : await insforge.getHttpClient().getValidAccessToken();
   let response: Response;
@@ -42,3 +42,6 @@ export function parseEnv(text: string) {
   return values;
 }
 export function message(error: unknown) { return error instanceof Error ? error.message : 'The request could not be completed. Please try again.'; }
+
+export type TrialAccount={approved:boolean;trialUsed:boolean;durationMinutes:number;capacity?:number};
+export const getTrialAccount=()=>backend<TrialAccount>('/api/trial',{});

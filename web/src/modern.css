@@ -105,3 +105,5 @@ footer{font-size:11px;color:var(--copy)}
 .dockerfile-review { margin-top:18px; }
 .dockerfile-review pre { padding:16px; border:1px solid var(--line); border-radius:10px; max-height:320px; overflow:auto; font-size:12px; line-height:1.6; white-space:pre; }
 .source-tabs { margin-bottom:20px; }
+
+.pricing-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}.pricing-card{padding:32px}.pricing-card .price{font-size:42px;display:block;margin:24px 0}.trial-countdown{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}.trial-countdown.expired{color:#d97706}@media(max-width:700px){.pricing-grid{grid-template-columns:1fr}}

@@ -384,3 +384,12 @@ def test_missing_env_file_fails_explicitly(tmp_path):
         assert "Environment file not found" in str(exc)
     else:
         raise AssertionError("Expected a missing env file to fail.")
+
+def test_explicit_replica_limit_is_applied_on_creation_and_update():
+    from ebkit.commands.deploy import _existing_environment_update_options
+    infra={'cluster_role':'cluster','node_role':'node','operation_role':'operation','observability_role':'observability'}
+    settings=_build_cluster_option_settings(infra,{},3000,max_replicas=1)
+    assert next(option['Value'] for option in settings if option['OptionName']=='max-replica')=='1'
+    eb=MagicMock();eb.describe_configuration_settings.return_value={'ConfigurationSettings':[{'OptionSettings':[]}]}
+    updated=_existing_environment_update_options(eb,'app','env',{},3000,max_replicas=1)
+    assert {option['OptionName']:option['Value'] for option in updated if 'autoscaling' in option['Namespace']}=={'min-replica':'1','max-replica':'1'}

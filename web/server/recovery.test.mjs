@@ -23,7 +23,7 @@ function database(rows, fail = () => false) {
     return query;
   } } };
 }
-const config = root => ({ liveEnabled: true, python: process.execPath, allowedEmails: ['owner@example.test'], origins: [], jobRoot: root });
+const config = root => ({ trialsEnabled:false,liveEnabled: true, python: process.execPath, allowedEmails: ['owner@example.test'], origins: [], jobRoot: root });
 async function serve(root, admin, deps = {}) {
   const server = await createWorker(config(root), { admin, authenticate: async()=>({id:'owner',email:'owner@example.test'}), fetch: async url => new Response(JSON.stringify(url.includes('/contents/') ? { type:'file',size:200 } : {private:false,archived:false,default_branch:'main'})), pollInterval: 30, ...deps });
   await new Promise(resolve => server.listen(0,'127.0.0.1',resolve)); servers.push(server);

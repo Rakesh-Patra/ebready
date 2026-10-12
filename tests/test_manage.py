@@ -130,3 +130,26 @@ def test_redeploy_preserves_settings_and_scaling(target):
     assert updated["KEEP"] == "yes"
     assert updated["NEW"] == "new"
     assert updated["PORT"] == "8080"
+
+@pytest.mark.parametrize('state,artifacts,expected', [('DELETE_COMPLETE','Completed eligible cleanup',True),('DELETE_IN_PROGRESS','Completed eligible cleanup',False),('DELETE_COMPLETE','Not recorded',False)])
+def test_cleanup_json_requires_both_artifact_and_managed_deletion(monkeypatch,state,artifacts,expected):
+    session=MagicMock();session.client.return_value.describe_stacks.return_value={'Stacks':[{'StackStatus':state}]}
+    monkeypatch.setattr(manage.ops,'_aws_session',lambda *args:(session,'account'))
+    monkeypatch.setattr(manage.ops,'_matching_deployments',lambda *args:[{'environment_name':'demo','cluster_arn':'arn/cluster','artifact_cleanup':artifacts}])
+    result=CliRunner().invoke(manage.cleanup_status_command,['--json'])
+    assert result.exit_code==0,result.output
+    assert json.loads(result.output)['cleanup_complete'] is expected
+    session.client.return_value.delete_stack.assert_not_called()
+
+def test_cleanup_json_missing_cluster_remains_unverified(monkeypatch):
+    monkeypatch.setattr(manage.ops,'_aws_session',lambda *args:(MagicMock(),'account'))
+    monkeypatch.setattr(manage.ops,'_matching_deployments',lambda *args:[{'environment_name':'demo','artifact_cleanup':'Completed eligible cleanup'}])
+    result=CliRunner().invoke(manage.cleanup_status_command,['--json'])
+    assert result.exit_code==0
+    assert json.loads(result.output)['cleanup_complete'] is False
+
+def test_cleanup_json_verifies_pre_cluster_build_cleanup(monkeypatch):
+    monkeypatch.setattr(manage.ops,'_aws_session',lambda *args:(MagicMock(),'account'))
+    monkeypatch.setattr(manage.ops,'_matching_deployments',lambda *args:[{'environment_name':'demo','no_cluster_created':True,'artifact_cleanup':'Completed eligible cleanup'}])
+    result=CliRunner().invoke(manage.cleanup_status_command,['--json'])
+    assert result.exit_code==0 and json.loads(result.output)['cleanup_complete'] is True
