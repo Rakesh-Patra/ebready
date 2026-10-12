@@ -5,7 +5,7 @@ import { createWorker, commandArguments, validateRepository, redact } from './wo
 const github = vi.fn(async url => new Response(JSON.stringify(url.includes('/contents/') ? { type: 'file', size: 200 } : { private: false, archived: false, default_branch: 'main' }), { status: 200 }));
 const servers = [];
 afterEach(async () => { github.mockClear(); for (const server of servers.splice(0)) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } });
-async function serve(config = {}, deps = {}) { const server = await createWorker({ liveEnabled: false, allowedEmails: [], origins: ['http://localhost:5173'], ...config }, deps); await new Promise(resolve => server.listen(0,'127.0.0.1',resolve)); servers.push(server); return `http://127.0.0.1:${server.address().port}`; }
+async function serve(config = {}, deps = {}) { const server = await createWorker({ liveEnabled: false, allowedEmails: [], origins: ['http://localhost:5173'], ...config }, { recover: false, ...deps }); await new Promise(resolve => server.listen(0,'127.0.0.1',resolve)); servers.push(server); return `http://127.0.0.1:${server.address().port}`; }
 const post = (url, body, headers = {}) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
 const project = { id: '11111111-1111-4111-8111-111111111111', user_id: 'owner', mode: 'live', name: 'demo-app', repository: 'https://github.com/owner/project', application_name: 'ebk-test', environment_name: 'ebk-test-cluster', port: 8080, region: 'us-east-2' };
 function database(rows) {

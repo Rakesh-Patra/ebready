@@ -35,7 +35,7 @@ from ebkit.commands.manage import (
     epilog=(
         "Getting started: verify your AWS account with `aws sts get-caller-identity`, "
         "then run `ebkit deploy --help` or `ebkit init --help`. Deploy requires a "
-        "public GitHub repository with a root Dockerfile. Commands that change AWS "
+        "public GitHub repository or reviewed project ZIP with a root Dockerfile. Commands that change AWS "
         "resources may incur charges; review the target and confirmation prompts. "
         "Run `ebkit COMMAND --help` for command-specific options."
     )

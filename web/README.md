@@ -16,7 +16,7 @@ npm.cmd run backend
 npm.cmd run dev
 ```
 
-Open **http://127.0.0.1:5173/**. Both processes are already running in this workspace. Vite proxies `/api` to the local backend on port 8787. Startup makes no AWS calls.
+Open **http://127.0.0.1:5173/**. Vite proxies `/api` to the local backend on port 8787. Startup checks saved job records and InsForge; it does not launch AWS commands. Previously authorized jobs can keep running during a backend restart.
 
 ## Accounts
 
@@ -38,6 +38,8 @@ EBKIT_PYTHON=
 EBKIT_LIVE_ENABLED=false
 EBKIT_ALLOWED_EMAILS=
 EBKIT_WEB_ORIGINS=http://127.0.0.1:5173,http://localhost:5173
+GEMINI_API_KEY=
+EBKIT_GEMINI_MODEL=gemini-2.5-flash
 ```
 
 `INSFORGE_API_KEY` is the server-only project admin key. `EBKIT_PYTHON` is the full path to Python with EBKit installed. Set `EBKIT_LIVE_ENABLED=true` and list approved account emails in `EBKIT_ALLOWED_EMAILS`, separated by commas. This workspace allows the current InsForge operator's email. Restart the backend after changing its configuration.
@@ -49,10 +51,24 @@ The worker binds only to loopback. Do not expose the development Vite server pub
 ## Deploy and manage
 
 1. Log in using an operator-approved account.
-2. Click **New deployment**, enter a public GitHub URL and acknowledge the root Dockerfile requirement.
+2. Click **New deployment**, choose **GitHub link** or **Upload ZIP**. ZIP mode requires login and operator approval even for preparation; it makes no GitHub API requests.
 3. **Check repository & continue** checks GitHub metadata and the root `Dockerfile` on the default branch. Missing/private repositories, missing Dockerfiles, rate limits and connectivity errors appear inline. This verifies presence, not build correctness or CVEs.
 4. Enter a project name, region, port and optional `KEY=VALUE` settings. Importing `.env` reads the file locally. In live mode, values are sent only on deployment, passed through a temporary server file to EBKit, then removed after the operation. The project database stores variable names only. Known supplied values are redacted from worker output. Applications should never log secrets themselves.
 5. Confirm AWS charges and click **Deploy to AWS**. EBKit uses CodeBuild, ECR and Elastic Beanstalk Cluster Mode. Logs contain actual CLI output. Ready requires the saved AWS deployment result to report Ready and Green; failures remain failures.
+
+### ZIP preparation and review
+
+Upload a ZIP up to 25 MB, then choose **Detect project settings**. Review the detected container port, correct it if needed, and check **I checked the container port** before preparing the Dockerfile. Detection is a suggestion; it does not change the application listening port. A single enclosing folder (including GitHub's downloaded ZIP layout) is flattened. Unsafe paths, links, duplicate paths, excessive compression, more than 5,000 entries or more than 200 MB expanded are rejected. `.env` files, common credential files and installed dependencies are omitted; keep secrets out of all source files yourself.
+
+The existing root Dockerfile is displayed. If missing, approve AI analysis and **Prepare & review Dockerfile** first uses the existing Docker AI (Gordon) integration. If Gordon is unavailable, fails or returns an invalid draft, Gemini uses the operator's server-side `GEMINI_API_KEY`. Only project scan metadata and selected manifests are supplied to generation; Gordon is instructed to return text without reading files, modifying files or running commands. The review screen identifies the provider. The key is never returned to the browser, put in a `VITE_` variable or passed to a deployment subprocess. Each approved account has five AI attempts per UTC day; missing/limited Gemini access produces a visible error and cannot enable deployment.
+
+Review the full Dockerfile, then check **I reviewed this root Dockerfile**. Download the Dockerfile or the prepared ZIP, or continue to configuration. The backend independently verifies ownership and the reviewed Dockerfile hash before deployment. Enter real environment values separately; archive preparation generates names/placeholders without provisioning a database. Preparation then runs the same Docker Scout source-dependency validator as local init, without building an image. The source gate requires zero Critical CVEs and at most five High CVEs. Failures or unavailable Scout block continuation and are independently rejected by the deployment backend. The Dockerfile and full findings remain available for review/download so dependencies can be fixed. This does not scan the application image or certify runtime/build correctness.
+
+The website also preserves an explicit Scout bypass: the user must acknowledge that security will NOT be verified, then run **Prepare with Scout bypass**. The warning remains visible during review and deployment configuration. A missing/failed scan never silently becomes a pass.
+
+ZIP builds use private encrypted S3 source storage and CodeBuild, with object-specific read permissions for the build role. Source objects are removed after the build; a one-day lifecycle rule covers abandoned sources. Destroy removes the verified application-owned source bucket and retained local ZIP source. Unclaimed uploads expire after 24 hours and are purged on a later upload. Claimed source is retained on private persistent disk for redeploy/recovery; redeploy builds the same reviewed uploaded snapshot. Choose **Upload ZIP & redeploy** on an existing ZIP project to prepare and review a replacement ZIP. It updates the same application/environment and keeps the URL; provide required environment values again. Redeploy without a replacement through the API reuses the existing snapshot. GitHub redeploy builds the repository latest code. Auto-deploy on GitHub push is planned and will apply only to GitHub projects; ZIP updates are manual.
+
+For hosted CLI ZIP init, sign in on the website and use **Deploy with CLI → Copy CLI session token**. Configure `EBKIT_SERVICE_URL` to the website origin and `EBKIT_ACCESS_TOKEN` to that session token. Run `ebkit init --zip project.zip`; the service tries Gordon first, falls back to the operator Gemini key, prints the Dockerfile for confirmation and downloads the prepared source. Keep the token private; it expires with the account session. Hosted init runs source Scout by default and does not run local builds. `--no-scout` requires an explicit bypass and prints SECURITY NOT VERIFIED; it does not fix vulnerabilities.
 
 Project controls:
 
@@ -63,6 +79,16 @@ Project controls:
 - **Destroy** requires the generated environment name. It terminates the environment and cleans eligible EBKit artifacts while retaining cleanup metadata. Shared infrastructure and external services remain. Managed EKS deletion can stay pending and continue charging after environment termination; inspect Cleanup-status.
 
 The pilot worker runs one operation at a time. Each user can have three active live projects, with five launches per worker process. Keep the operator allowlist; durable quotas and billing controls are needed before open public paid deployments.
+
+### Interrupted-job recovery
+
+Cloud commands run in a detached runner that writes atomic job records and redacted logs to the private `server/.jobs` directory. Restarting the HTTP backend reconnects to the existing runner without starting another build, deployment, rollback or destroy command. The original two-hour operation timeout remains in effect across backend restarts; this is a command timeout, not the planned trial expiry feature.
+
+If a job completes while the backend is offline, its result is applied when the backend returns. Failed database updates are retried from the saved completion record, and revision updates are idempotent. A second backend cannot use the same directory concurrently.
+
+If the runner and CLI were also stopped, recovery clears the stuck running flag and shows an **Operation interrupted** error. Check **Status** and **Resources**, then retry or destroy as appropriate. Recovery never automatically repeats cloud mutations or claims that interrupted cleanup succeeded. If the runner died but its CLI process is still alive, the worker holds the operation lock until that process exits, preventing duplicate actions.
+
+Use the same private persistent disk across restarts. Optionally set `EBKIT_JOBS_DIR` to its absolute path. Journals contain command metadata and redacted output; supplied secret values remain only in the temporary `.env`, which is removed on completion. A host shutdown removes the running processes; it cannot resume a CLI mid-command. Missing legacy job records are reported as interrupted. Startup fails closed if the database or job records cannot be checked.
 
 For a missing Dockerfile, run `ebkit init` locally, review the generated Dockerfile and Scout findings, then push it. The existing CLI Scout bypass and warning remain available. The web presence check does not run Scout.
 
@@ -76,6 +102,7 @@ Website changes are isolated in the `ebkit-web` schema-only branch. Apply both r
 
 - `20261011060931_ebkit-web-projects.sql`
 - `20261011062758_ebkit-web-live-worker.sql`
+- `20261012101600_ebkit-web-zip-sources.sql`
 
 Owners can read their projects through row-level security. Browser clients may create/update/delete only their own demo records. The authenticated worker writes live AWS records and results after checking ownership and the operator allowlist. Clients cannot change ownership or live status.
 
@@ -87,13 +114,13 @@ npm.cmd run build
 npm.cmd audit
 ```
 
-Tests cover account flows, wizard clicks, GitHub checks, command construction, ownership, allowlist enforcement, secret redaction and worker execution using mocked AWS subprocesses. These checks do not create billable AWS resources. User sign-in and AWS role permissions still require end-to-end verification; unit tests do not prove them.
+Tests cover account flows, wizard clicks, GitHub checks, command construction, ownership, allowlist enforcement, secret redaction and worker execution using mocked AWS subprocesses. Recovery tests use a real detached Node runner with a harmless CLI substitute to verify restart adoption, database retry, orphan detection and duplicate-operation prevention. These checks do not create billable AWS resources. User sign-in and AWS role permissions still require end-to-end verification; unit tests do not prove them.
 
 ## Public hosting
 
-Serve `dist/` and proxy `/api` to the worker over HTTPS. Configure that origin in InsForge and `EBKIT_WEB_ORIGINS`, provide server-only secrets, and use a dedicated IAM role. Run the worker under a process supervisor with a private persistent `.jobs` volume for deployment state. A restart does not automatically recover an interrupted operation; inspect AWS Status/Resources before retrying.
+Serve `dist/` and proxy `/api` to the worker over HTTPS. Configure that origin in InsForge and `EBKIT_WEB_ORIGINS`, provide server-only secrets, and use a dedicated IAM role. Run the worker under a process supervisor with a private persistent `.jobs` volume for deployment state and recovery records. Configure the supervisor to restart the HTTP backend independently of detached job runners. Killing an entire container or process group also kills its jobs; recovery reports those as interrupted.
 
-Before broader production use, replace the single-process worker with a durable queue, shared quotas, encrypted secret storage, rate limiting and automatic recovery.
+Before broader production use, replace this single-host execution model with a durable distributed queue, shared quotas, encrypted secret storage and rate limiting. This recovery implementation supports one backend host and persistent disk; it does not coordinate multiple replicas or hosts.
 
 ### Required environment settings
 

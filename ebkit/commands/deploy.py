@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -274,7 +275,10 @@ def _verify_ecr_image(ecr_client, image_uri: str) -> None:
 
 def _codebuild_names(app_name: str, repo_url: str) -> Tuple[str, str]:
     parsed = urlsplit(repo_url)
-    owner, repo = parsed.path.strip("/").removesuffix(".git").split("/")
+    if parsed.scheme == 'zip':
+        owner, repo = 'zip', app_name
+    else:
+        owner, repo = parsed.path.strip("/").removesuffix(".git").split("/")
     full_name = f"{app_name}-{owner}-{repo}"
     slug = re.sub(r"[^A-Za-z0-9_-]", "-", full_name).strip("-") or "app"
     suffix = f"{slug[:36].rstrip('-')}-{hashlib.sha256(full_name.encode()).hexdigest()[:8]}"
@@ -348,12 +352,19 @@ def _build_image_in_aws(
     repo_name: str,
     repo_url: str,
     image_uri: str,
+    zip_source: Optional[Dict] = None,
 ) -> Dict[str, str]:
     parsed = urlsplit(repo_url)
     github_location = f"https://github.com{parsed.path.rstrip('/').removesuffix('.git')}.git"
-    project_name, role_name = _codebuild_names(app_name, github_location)
+    project_name, role_name = _codebuild_names(app_name, repo_url if zip_source else github_location)
     repository_arn = f"arn:aws:ecr:{region}:{account_id}:repository/{repo_name}"
     role_arn = _ensure_iam_role(iam_client, role_name, "codebuild.amazonaws.com", [])
+    source_permissions = []
+    if zip_source:
+        source_permissions = [
+            {'Effect':'Allow','Action':['s3:GetObject','s3:GetObjectVersion'],'Resource':f"arn:aws:s3:::{zip_source['bucket']}/{zip_source['key']}"},
+            {'Effect':'Allow','Action':['s3:GetBucketLocation','s3:GetBucketAcl'],'Resource':f"arn:aws:s3:::{zip_source['bucket']}"},
+        ]
     iam_client.put_role_policy(
         RoleName=role_name,
         PolicyName="EBKitBuildAndPushImage",
@@ -380,7 +391,7 @@ def _build_image_in_aws(
                         f"arn:aws:logs:{region}:{account_id}:log-group:/aws/codebuild/{project_name}:*",
                     ],
                 },
-            ],
+            ] + source_permissions,
         }),
     )
     project_args = {
@@ -415,6 +426,10 @@ def _build_image_in_aws(
         "tags": [{"key": "ManagedBy", "value": "EBKit"},
                  {"key": "EBKitApplication", "value": app_name}],
     }
+    if zip_source:
+        project_args['description'] = f'Build reviewed ZIP source for {app_name}'
+        project_args['source'].update(type='S3', location=zip_source['location'])
+        project_args['source'].pop('gitCloneDepth', None)
     try:
         _codebuild_role_call(codebuild_client, "create_project", **project_args)
     except ClientError as exc:
@@ -621,6 +636,7 @@ def _execute_deploy(
     env_file: Optional[str],
     extra_env: Tuple[str, ...],
     is_interactive: bool,
+    archive_path: Optional[str] = None,
 ) -> Dict:
     config = load_config()
     parsed = urlsplit(source_url)
@@ -675,10 +691,19 @@ def _execute_deploy(
 
     _persist_deployment(deployment)
     session = boto3.Session(region_name=region)
+    zip_source = None
+    if archive_path:
+        from ebkit.zip_deploy import upload_source, source_bucket
+        deployment['source_bucket'] = source_bucket(account_id, region, app)
+        _persist_deployment(deployment)
+        zip_source = upload_source(session.client('s3'), Path(archive_path), account_id, region, app)
+        deployment['source_key'] = zip_source['key']
+        _persist_deployment(deployment)
     ecr = session.client("ecr")
     eb = session.client("elasticbeanstalk")
     _ensure_ecr_repo(ecr, app)
-    build_info = _build_image_in_aws(
+    try:
+      build_info = _build_image_in_aws(
         iam_client=session.client("iam"),
         codebuild_client=session.client("codebuild"),
         account_id=account_id,
@@ -687,7 +712,14 @@ def _execute_deploy(
         repo_name=app,
         repo_url=source_url,
         image_uri=image_uri,
+        **({'zip_source':zip_source} if zip_source else {}),
     )
+    finally:
+        if zip_source:
+            try:
+                session.client('s3').delete_object(Bucket=zip_source['bucket'], Key=zip_source['key'])
+            except (BotoCoreError, ClientError):
+                _info('Source ZIP cleanup is pending; destroy cleans owned source storage and a one-day lifecycle rule is configured.')
     deployment.update(build_info)
     deployment["codebuild_project"] = build_info.get("project_name", codebuild_project)
     _verify_ecr_image(ecr, image_uri)
@@ -748,13 +780,34 @@ def _execute_deploy(
 @click.option("--env-file", help="Local file containing application environment variables")
 @click.option("--env", "extra_env", multiple=True, metavar="KEY=VALUE", help="Application environment variable")
 @click.option("-y", "--yes", is_flag=True, help="Skip the deployment confirmation")
-def deploy(source, app, environment_name, region, port, wait, env_file, extra_env, yes):
-    """Deploy a public GitHub repository containing a root Dockerfile."""
+@click.option('--reviewed', is_flag=True, help='Confirm that you reviewed the root Dockerfile in this ZIP.')
+def deploy(source, app, environment_name, region, port, wait, env_file, extra_env, yes, reviewed=False):
+    """Deploy a GitHub URL or a reviewed local project ZIP using AWS CodeBuild."""
     source = source.strip()
+    if Path(source).is_file() and source.lower().endswith('.zip'):
+        from ebkit.source_bundle import extract_zip, make_zip
+        import zipfile
+        try:
+            with tempfile.TemporaryDirectory(prefix='ebkit-zip-deploy-') as directory:
+                root = extract_zip(Path(source), Path(directory)/'project')
+                dockerfile = root/'Dockerfile'
+                if not dockerfile.is_file() or not dockerfile.read_text(encoding='utf-8').strip():
+                    raise click.ClickException('ZIP needs a root Dockerfile. Run ebkit init --zip first, then deploy the prepared ZIP.')
+                if not reviewed:
+                    click.echo('\nReview the root Dockerfile:\n'+dockerfile.read_text(encoding='utf-8'))
+                    if yes or not sys.stdin.isatty():
+                        raise click.ClickException('ZIP deployment requires --reviewed after checking its Dockerfile; --yes does not approve AI output.')
+                    if not click.confirm('I reviewed this Dockerfile. Continue?',default=False): raise click.Abort()
+                prepared = make_zip(root,Path(directory)/'source.zip')
+                archive_name = re.sub(r'[^a-z0-9-]', '-', Path(source).stem.lower()).strip('-') or 'zip-app'
+                _execute_deploy(source_url=f'zip://source/{archive_name}',app=app,env=environment_name,region=region,port=port,wait=wait,env_file=env_file,extra_env=extra_env,is_interactive=not yes and sys.stdin.isatty(),archive_path=str(prepared))
+                return
+        except (ValueError, OSError, zipfile.BadZipFile, BotoCoreError, ClientError, RuntimeError, TimeoutError) as error:
+            raise click.ClickException(str(error)) from None
     valid, error = validate_github_url(source)
     if not valid:
         raise click.ClickException(
-            f"SOURCE must be a public GitHub repository URL: {error}"
+            f"SOURCE must be a public GitHub URL or local .zip file: {error}"
         )
     try:
         _execute_deploy(

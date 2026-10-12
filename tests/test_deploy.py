@@ -118,7 +118,7 @@ def test_deploy_rejects_local_paths_and_removed_deployment_options():
     local_path = runner.invoke(deploy, ["."])
 
     assert local_path.exit_code != 0
-    assert "public GitHub repository URL" in local_path.output
+    assert "public GitHub URL or local .zip file" in local_path.output
     for option in ("--compose", "--no-build", "--no-push", "--tag"):
         removed_option = runner.invoke(
             deploy, ["https://github.com/example/app", option]

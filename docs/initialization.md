@@ -11,14 +11,19 @@ Run init in a local project:
 ebkit init --path .
 ```
 
-Or initialize a public GitHub repository:
+Or initialize a project ZIP:
 
 ```powershell
-ebkit init --repo https://github.com/OWNER/REPOSITORY
+ebkit init --zip ./project.zip
 ```
 
-The GitHub repository is cloned into a folder named after the project in the current
-directory. Init stops rather than overwriting an existing clone directory.
+ZIP init safely extracts source, generates deployment files and exports a prepared ZIP.
+For hosted init using the operator Gemini key, configure `EBKIT_SERVICE_URL` and
+`EBKIT_ACCESS_TOKEN` from an approved website session; no user AI key is needed.
+
+GitHub links are deployment-only. Create and review the Dockerfile locally, push it
+to GitHub, then run `ebkit deploy https://github.com/OWNER/REPOSITORY`.
+The old `init --repo` option now returns this guidance rather than cloning/analyzing a URL.
 
 ## AI provider
 
@@ -36,9 +41,9 @@ export GEMINI_API_KEY="your-key"
 ebkit init
 ```
 
-Review generated output and never commit or share the API key. For multi-tier
-projects, init may use Docker AI (Gordon) to generate a Dockerfile and falls back to
-Gemini if needed. Generation is best-effort: inspect the Dockerfile and run the app
+Review generated output and never commit or share the API key. Dockerfile generation
+tries Docker AI (Gordon) first, then Gemini if Gordon is unavailable or fails,
+for both single-tier and multi-tier projects. Generation is best-effort: inspect the Dockerfile and run the app
 locally to verify its behavior.
 
 ## Validation and local builds

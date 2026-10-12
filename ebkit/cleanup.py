@@ -45,6 +45,21 @@ def cleanup_application_artifacts(session, app, record):
     if any(item.get("Status") != "Terminated" for item in active):
         return ["Retained application artifacts: another environment still uses this application."]
     messages = []
+    bucket = record.get('source_bucket')
+    if bucket:
+        s3 = session.client('s3')
+        try:
+            tags = {tag['Key']:tag['Value'] for tag in s3.get_bucket_tagging(Bucket=bucket).get('TagSet',[])}
+            if tags.get('ManagedBy') == 'EBKit' and tags.get('EBKitApplication') == app:
+                for page in s3.get_paginator('list_objects_v2').paginate(Bucket=bucket):
+                    objects = [{'Key':item['Key']} for item in page.get('Contents',[])]
+                    if objects: s3.delete_objects(Bucket=bucket,Delete={'Objects':objects})
+                s3.delete_bucket(Bucket=bucket)
+                messages.append(f'Deleted owned ZIP source bucket: {bucket}')
+            else:
+                messages.append(f'Retained unverified source bucket: {bucket}')
+        except ClientError as error:
+            if error.response['Error']['Code'] not in ('NoSuchBucket',): raise
     project = record.get("codebuild_project")
     if project:
         codebuild = session.client("codebuild")

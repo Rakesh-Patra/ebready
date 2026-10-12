@@ -40,7 +40,7 @@ from ebkit.config import EBKitConfig, load_config, save_config
 from ebkit.generator.docker_ai import DockerAIService
 from ebkit.generator.renderer import DeploymentKitRenderer, RenderedKit
 from ebkit.models.deployment_config import DeploymentConfig
-from ebkit.repo_handler import safe_clone_repo, validate_github_url
+from ebkit.repo_handler import validate_github_url
 from ebkit.validator.cluster_preflight import (
     ClusterModePreflightValidator,
     PreflightReport,
@@ -311,12 +311,12 @@ def _print_ebready_plan(
 def _prompt_project_source() -> tuple[Path, Optional[str], str]:
     """
     Prompt user for project source.
-    Returns (repo_path, cleanup_path, repo_label); GitHub clones are retained.
+    Returns (repo_path, cleanup_path, repo_label). GitHub links are deploy-only.
     """
     click.echo("🚀 Welcome to EBReady\n")
     click.echo("Where is your project?\n")
     click.echo("1. Current directory")
-    click.echo("2. GitHub repository")
+    click.echo("2. GitHub deployment guidance")
     click.echo("3. Local project path\n")
 
     choice = click.prompt("Select", default="1", show_default=True).strip()
@@ -327,15 +327,7 @@ def _prompt_project_source() -> tuple[Path, Optional[str], str]:
         return repo_path, None, "."
 
     if choice == "2":
-        click.echo("GitHub repository URL:")
-        raw_url = click.prompt(">", prompt_suffix=" ").strip()
-        is_valid, err_msg = validate_github_url(raw_url)
-        if not is_valid:
-            click.echo(f"\n❌ Invalid GitHub repository URL: {err_msg}", err=True)
-            sys.exit(1)
-
-        repo_path = _clone_repo_to_local_folder(raw_url)
-        return repo_path, None, raw_url
+        raise click.UsageError('GitHub links are for deployment only. Run ebkit init --path locally, review and push the files, then use ebkit deploy URL. Use --zip for ZIP init.')
 
     if choice == "3":
         click.echo("Local project path:")
@@ -351,34 +343,6 @@ def _prompt_project_source() -> tuple[Path, Optional[str], str]:
 
     click.echo(f"\n❌ Invalid selection: '{choice}'. Please select 1, 2, or 3.", err=True)
     sys.exit(1)
-
-
-def _clone_repo_to_local_folder(url: str) -> Path:
-    """Clone a GitHub repository into a new folder under the current directory."""
-    repo_name = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
-    if repo_name.lower().endswith(".git"):
-        repo_name = repo_name[:-4]
-    if not repo_name or repo_name in {".", ".."}:
-        raise click.ClickException("Could not determine a local folder name from the GitHub URL.")
-
-    destination = Path.cwd() / repo_name
-    try:
-        destination.mkdir()
-    except FileExistsError:
-        raise click.ClickException(
-            f"Cannot clone repository because '{destination}' already exists. "
-            "Move or rename that folder, then run `ebkit init` again."
-        ) from None
-    except OSError as exc:
-        raise click.ClickException(f"Could not create repository folder '{destination}': {exc}") from exc
-
-    try:
-        click.echo(f"Cloning repository into {destination}...")
-        safe_clone_repo(url, dest_dir=destination)
-    except Exception as exc:
-        shutil.rmtree(destination, ignore_errors=True)
-        raise click.ClickException(f"Failed to clone GitHub repository: {exc}") from exc
-    return destination
 
 
 def _check_gemini_key() -> None:
@@ -467,6 +431,8 @@ def _prompt_ai_provider(default_choice: str = "1") -> str:
 
 
 @click.command("init")
+@click.option('--zip', 'source_zip', type=click.Path(exists=True, dir_okay=False, resolve_path=True), help='Extract and initialize a project ZIP safely.')
+@click.option('--service-url', envvar='EBKIT_SERVICE_URL', help='Authenticated EBKit backend using the operator Gemini key (ZIP init).')
 @click.option(
     "--path",
     "-p",
@@ -478,7 +444,7 @@ def _prompt_ai_provider(default_choice: str = "1") -> str:
     "--repo",
     "-r",
     default=None,
-    help="GitHub or Git repository URL to clone and analyze.",
+    help="Deprecated: GitHub links are deployment-only. Use --path or --zip for init.",
 )
 @click.option(
     "--output",
@@ -568,32 +534,69 @@ def init_command(
     max_critical: int,
     max_high: int,
     max_repair_attempts: int,
+    source_zip: Optional[str] = None,
+    service_url: Optional[str] = None,
 ) -> None:
     """
     Initialize EBReady deployment kit with interactive setup wizard.
     """
     tmp_clone_dir: Optional[str] = None
     repo_label: str = ""
+    if repo:
+        raise click.UsageError('GitHub links are for deployment only. Create and review the root Dockerfile locally, push it, then run ebkit deploy URL. Use --path or --zip for init.')
+    if sum(bool(value) for value in (path, repo, source_zip)) > 1:
+        raise click.UsageError('Choose only one of --path, --repo or --zip.')
+    if service_url:
+        if not source_zip:
+            if click.get_current_context().get_parameter_source('service_url') == click.core.ParameterSource.ENVIRONMENT:
+                service_url = None
+            else:
+                raise click.UsageError('--service-url currently requires --zip.')
+    if service_url:
+        if dry_run or build is True or runtime is True:
+            raise click.UsageError('Hosted ZIP init supports source Scout and review/download. Use local init for --dry-run, --build or --runtime.')
+        if max_critical != 0 or max_high != 5:
+            raise click.UsageError('Hosted ZIP init uses fixed Scout thresholds: 0 Critical and at most 5 High. Use local init for custom thresholds.')
+        from ebkit.hosted_init import hosted_init
+        hosted_init(source_zip, output, service_url, port, skip_scout=scout is False)
+        return
+    if source_zip:
+        from ebkit.source_bundle import extract_zip, make_zip
+        import zipfile
+        archive = Path(source_zip)
+        if dry_run:
+            import tempfile
+            temporary = tempfile.TemporaryDirectory(prefix='ebkit-zip-preview-')
+            click.get_current_context().call_on_close(temporary.cleanup)
+            destination = Path(temporary.name) / 'project'
+        else:
+            destination = Path(output) if output else archive.with_name(archive.stem + '-ebkit')
+        try:
+            path = str(extract_zip(archive, destination))
+        except (ValueError, OSError, zipfile.BadZipFile) as error:
+            raise click.ClickException(str(error)) from None
+        output = path
+        def export_zip():
+            if not dry_run and (destination / 'Dockerfile').is_file():
+                target = archive.with_name(archive.stem + '-prepared.zip')
+                if target.exists():
+                    click.echo(f'Prepared ZIP not overwritten: {target}. Archive the initialized folder yourself.')
+                    return
+                make_zip(destination, target)
+                click.echo(f'Prepared project ZIP: {target}\nReview its root Dockerfile before deploying. Security findings above still apply.')
+        click.get_current_context().call_on_close(export_zip)
     if build is False and runtime is True:
         raise click.UsageError("--runtime cannot be combined with --no-build.")
     saved_cfg = load_config()
 
     # ── Non-interactive / CI Mode Validation ───────────────────────────────
     if yes:
-        if not path and not repo:
-            click.echo("\n❌ Non-interactive mode requires a project path or repository.", err=True)
+        if not path:
+            click.echo("\n❌ Non-interactive mode requires --path or --zip.", err=True)
             sys.exit(1)
 
-        if repo:
-            is_valid, err_msg = validate_github_url(repo)
-            if not is_valid:
-                click.echo(f"\n❌ Invalid GitHub repository URL: {err_msg}", err=True)
-                sys.exit(1)
-            repo_path = _clone_repo_to_local_folder(repo)
-            repo_label = repo
-        else:
-            repo_path = Path(path).resolve()
-            repo_label = str(repo_path)
+        repo_path = Path(path).resolve()
+        repo_label = str(repo_path)
 
         chosen_analyzer = (analyzer or "").lower()
         if chosen_analyzer in ("openai", "claude", "groq"):
@@ -610,14 +613,7 @@ def init_command(
 
     else:
         # ── Interactive Mode ────────────────────────────────────────────────
-        if repo:
-            is_valid, err_msg = validate_github_url(repo)
-            if not is_valid:
-                click.echo(f"\n❌ Invalid GitHub repository URL: {err_msg}", err=True)
-                sys.exit(1)
-            repo_path = _clone_repo_to_local_folder(repo)
-            repo_label = repo
-        elif path:
+        if path:
             repo_path = Path(path).resolve()
             repo_label = str(repo_path)
         else:
@@ -824,7 +820,7 @@ def init_command(
 
     # Docker AI (Gordon) Dockerfile Generation
     docker_ai = DockerAIService()
-    if docker_ai.is_available() or scan.architecture == "MULTI_TIER":
+    if docker_ai.is_available() or chosen_analyzer in ('gemini', 'google'):
         click.echo("\n🤖 AI generating the root Dockerfile...\n")
         gordon_df, gen_msg = docker_ai.generate_dockerfile(config, scan, working_dir=repo_path)
         if gordon_df:

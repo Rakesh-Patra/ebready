@@ -6,8 +6,9 @@ const api = vi.hoisted(() => ({
   auth: { getCurrentUser: vi.fn(), onAuthStateChange: vi.fn((_callback: (event: string) => void) => () => {}), signInWithOAuth: vi.fn(), signOut: vi.fn() },
   database: { from: vi.fn() },
   backend: vi.fn(),
+  uploadZip: vi.fn(), downloadPreparedZip: vi.fn(),
 }));
-vi.mock('./lib', async original => ({ ...await original<typeof import('./lib')>(), insforge: api, backend: api.backend }));
+vi.mock('./lib', async original => ({ ...await original<typeof import('./lib')>(), insforge: api, backend: api.backend, uploadZip:api.uploadZip, downloadPreparedZip:api.downloadPreparedZip }));
 vi.mock('@insforge/sdk', () => ({ createClient: () => ({}), AuthChangeEvent: { SIGNED_OUT: 'signedOut' } }));
 import App from './App';
 
@@ -150,9 +151,9 @@ describe('deployment dashboard', () => {
     await act(async () => listener('signedOut'));
     expect(await screen.findByRole('button', { name: /Sign in with Google/ })).toBeTruthy();
   });
-  async function failedProject(status = 'failed') {
+  async function failedProject(status = 'failed', repository = 'https://github.com/a/b') {
     api.auth.getCurrentUser.mockResolvedValue({ data: { user: { id: 'owner' } }, error: null });
-    const project = { id: '11111111-1111-4111-8111-111111111111', user_id: 'owner', name: 'failed-app', repository: 'https://github.com/a/b', region: 'us-east-2', port: 8080, mode: 'live', operation_log: 'Build succeeded\nERROR: health check failed', status, stage: 2, replicas: 1, revision: 1, variable_names: [], created_at: new Date().toISOString(), operation_running: false };
+    const project = { id: '11111111-1111-4111-8111-111111111111', user_id: 'owner', name: 'failed-app', repository, region: 'us-east-2', port: 8080, mode: 'live', operation_log: 'Build succeeded\nERROR: health check failed', status, stage: 2, replicas: 1, revision: 1, variable_names: [], created_at: new Date().toISOString(), operation_running: false };
     api.database.from.mockReturnValue({ select: () => ({ order: () => ({ limit: () => Promise.resolve({ data: [project], error: null }) }) }) });
     render(<App/>); await userEvent.click(await screen.findByRole('button', { name: /failed-app/ })); return project;
   }
@@ -161,6 +162,22 @@ describe('deployment dashboard', () => {
     expect((screen.getByRole('button', { name: 'Redeploy in AWS' }) as HTMLButtonElement).disabled).toBe(false);
     await userEvent.click(screen.getByRole('button', { name: 'Redeploy in AWS' }));
     expect(api.backend).toHaveBeenCalledWith(`/api/projects/${project.id}/deploy`, { confirmCosts: true });
+  });
+  it('updates a ZIP project through its existing deployment endpoint', async()=>{
+    const project=await failedProject('ready','zip:original.zip');const user=userEvent.setup();
+    api.uploadZip.mockResolvedValue({uploadId:'replacement',port:3000});
+    api.backend.mockImplementation(async(route:string)=>route.includes('/prepare')?{uploadId:'replacement',name:'updated.zip',dockerfile:'FROM node:22-alpine\nCMD ["node","app.js"]',reviewHash:'new-hash',generated:false,port:3000,environment:[],environmentScanComplete:true,scout:{gate_passed:true,summary:'Passed',details:[]}}:{});
+    await user.click(screen.getByRole('button',{name:'Upload ZIP & redeploy'}));
+    await user.upload(screen.getByLabelText('Project ZIP file'),new File(['zip'],'updated.zip',{type:'application/zip'}));
+    await user.click(screen.getByRole('button',{name:'Detect project settings'}));
+    await user.click(screen.getByRole('checkbox',{name:'I checked the container port.'}));await user.click(screen.getByRole('checkbox',{name:/Allow AI/}));
+    await user.click(screen.getByRole('button',{name:'Prepare & review Dockerfile'}));
+    await screen.findByText('Existing root Dockerfile');await user.click(screen.getByRole('checkbox',{name:'I reviewed this root Dockerfile.'}));
+    await user.click(screen.getByRole('button',{name:'Continue with reviewed ZIP'}));
+    expect((screen.getByLabelText('Project name') as HTMLInputElement).value).toBe(project.name);
+    await user.click(screen.getByRole('checkbox'));await user.click(screen.getByRole('button',{name:'Redeploy to AWS'}));
+    await waitFor(()=>expect(api.backend).toHaveBeenCalledWith(`/api/projects/${project.id}/deploy`,expect.objectContaining({uploadId:'replacement',reviewHash:'new-hash',reviewed:true,port:3000,confirmCosts:true})));
+    expect(api.backend.mock.calls.some(([route])=>route==='/api/deploy')).toBe(false);
   });
   it('lets a destroyed project start a fresh deployment with a new confirmation', async () => {
     const project = await failedProject('destroyed');
@@ -185,4 +202,33 @@ describe('deployment dashboard', () => {
     expect(screen.getByRole('status').textContent).toMatch(/previously created version/);
     expect(api.backend).not.toHaveBeenCalled();
   });
+});
+
+
+it('ZIP wizard requires Dockerfile review and environment values before enabling AWS deployment', async()=>{
+  const user=userEvent.setup();
+  api.auth.getCurrentUser.mockResolvedValue({data:{user:{id:'owner',email:'owner@example.test'}},error:null});
+  api.database.from.mockReturnValue({select:()=>({order:()=>({limit:async()=>({data:[],error:null})})})});
+  api.uploadZip.mockResolvedValue({uploadId:'zip-one',port:3000});
+  api.backend.mockResolvedValue({uploadId:'zip-one',name:'project.zip',dockerfile:'FROM node:22-alpine\nCMD ["node","app.js"]',reviewHash:'review-one',generated:true,port:3000,environment:[{name:'DATABASE_URL',required:true,source:'app.js'}],environmentScanComplete:true,scout:{gate_passed:true,summary:'Source dependency gate passed',details:[]}});
+  render(<App/>);await screen.findByText('Signed in');
+  await user.click(screen.getByRole('button',{name:/New deployment/}));
+  await user.click(screen.getByRole('button',{name:'Upload ZIP'}));
+  await user.upload(screen.getByLabelText('Project ZIP file'),new File(['zip'],'project.zip',{type:'application/zip'}));
+  await user.click(screen.getByRole('button',{name:'Detect project settings'}));
+  await user.click(screen.getByRole('checkbox',{name:'I checked the container port.'}));
+  await user.click(screen.getByRole('checkbox',{name:/Allow AI/}));
+  await user.click(screen.getByRole('button',{name:'Prepare & review Dockerfile'}));
+  await screen.findByText('AI Dockerfile draft');
+  expect(screen.queryByRole('button',{name:'Continue with reviewed ZIP'})).toBeNull();
+  await user.click(screen.getByRole('checkbox',{name:'I reviewed this root Dockerfile.'}));
+  await user.click(screen.getByRole('button',{name:'Continue with reviewed ZIP'}));
+  expect((screen.getByLabelText('Container port') as HTMLInputElement).value).toBe('3000');
+  expect(screen.queryByRole('button',{name:'Deploy to AWS'})).toBeNull();
+  await user.click(screen.getByRole('checkbox'));
+  expect(screen.queryByRole('button',{name:'Deploy to AWS'})).toBeNull();
+  await user.clear(screen.getByRole('textbox',{name:/Application environment/}));
+  await user.type(screen.getByRole('textbox',{name:/Application environment/}),'DATABASE_URL=postgresql://database.example/app');
+  expect(screen.getByRole('button',{name:'Deploy to AWS'})).toBeTruthy();
+  expect(api.backend).toHaveBeenCalledWith('/api/uploads/zip-one/prepare',{port:3000,allowAI:true});
 });

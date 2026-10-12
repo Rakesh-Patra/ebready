@@ -1,6 +1,6 @@
 # EBKit
 
-EBKit is a command-line tool for preparing applications and deploying a **public GitHub repository** to **AWS Elastic Beanstalk Cluster Mode**. The deployment flow is intentionally simple: give EBKit a GitHub URL and the container port; AWS CodeBuild builds the repository's root-level `Dockerfile`, pushes the image to ECR, and Elastic Beanstalk deploys it.
+EBKit is a command-line tool for preparing applications and deploying a **public GitHub repository or reviewed project ZIP** to **AWS Elastic Beanstalk Cluster Mode**. The deployment flow is intentionally simple: give EBKit a GitHub URL and the container port; AWS CodeBuild builds the repository's root-level `Dockerfile`, pushes the image to ECR, and Elastic Beanstalk deploys it.
 
 EBKit runs on your computer and deploys to **your AWS account**. It is not a hosted deployment service. AWS resources may incur charges.
 
@@ -13,9 +13,9 @@ You will need:
 - **Python 3.11 or newer**
 - **AWS CLI v2**, installed and configured for your AWS account
 - An AWS account with permission to use Elastic Beanstalk Cluster Mode, CodeBuild, ECR, IAM, EC2/VPC, and related services
-- A **public GitHub repository** with a `Dockerfile` at its root
+- A **public GitHub repository or local project ZIP** with a `Dockerfile` at its root
 - The application listening on `0.0.0.0` and the port you will pass to EBKit
-- A **Gemini API key** only if you plan to run `ebkit init`
+- A **Gemini API key** for local AI init, or an approved EBKit website session for hosted ZIP init using the operator key
 
 EBKit does not need Docker installed locally to deploy. CodeBuild builds the image in AWS. Cluster Mode provisions AWS infrastructure and may cost money while it is running; review AWS pricing and clean up environments you no longer need. Never share AWS credentials or API keys.
 
@@ -54,8 +54,8 @@ resources.
    Dockerfile at the repository root, skip to step 3. Otherwise, from the application
    folder run `ebkit init --path .`. Init may need a configured AI provider; Gemini is
    the default supported provider. Review the generated Dockerfile and files, test the
-   application, then commit and push them to GitHub. You can also initialize a public
-   GitHub project with `ebkit init --repo https://github.com/OWNER/REPOSITORY`.
+   application, then commit and push them to GitHub. GitHub links are deployment-only;
+   use a local directory or ZIP for init.
    Init does not deploy the app or provision its database.
 
 3. **Deploy the public GitHub repository.** Replace the URL, app name, environment,
@@ -90,7 +90,7 @@ only be used when you intentionally want non-interactive execution.
 - **`ebkit init`** — Generate the root Dockerfile and deployment files, validate
   them, and scan source dependencies with Docker Scout. Interactive init asks before
   a local build; `--no-scout` skips security scanning and reports it as unverified.
-- **`ebkit deploy GITHUB_URL`** — Build the application's root Dockerfile in AWS
+- **`ebkit deploy GITHUB_URL_OR_ZIP`** — Build the application's root Dockerfile in AWS
   CodeBuild, push the image to ECR, and deploy to Elastic Beanstalk Cluster Mode.
 - **`ebkit status`** — Show environment status, health, URL, and deployed version.
 - **`ebkit envlist`** — List environments in the selected AWS account and region.
@@ -175,7 +175,7 @@ EBKit performs the deployment without a local Docker build:
 
 The first deployment may create IAM roles, a CodeBuild project, an ECR repository, and Elastic Beanstalk resources. These are created in your AWS account using your credentials. You do not need to create a CodeBuild project, ECR repository, or EKS cluster manually. Private GitHub repositories are not supported by this flow.
 
-The source bundle must have the Dockerfile at its root. Do not put an extra parent folder around the files inside a ZIP; EBKit builds directly from the GitHub repository root.
+The source must have a Dockerfile at its root. Uploaded ZIPs may contain one enclosing project folder; EBKit safely flattens it before building.
 
 ### AWS IAM permissions and roles
 
@@ -187,7 +187,7 @@ permissions in the [AWS IAM guide](docs/aws-iam.md). Use least privilege; do not
 ### Options
 | Option | What it does |
 |---|---|
-| `SOURCE` | Required public GitHub repository URL |
+| `SOURCE` | Public GitHub repository URL or local project ZIP |
 | `--app` | Elastic Beanstalk application name; defaults to repository name |
 | `--environment`, `--env-name` | Elastic Beanstalk environment name; defaults to `<app>-cluster` |
 | `--region` | AWS region; defaults to saved AWS configuration or `us-east-2` |
@@ -212,10 +212,36 @@ provision databases or run migrations. Do not commit real environment files.
 For Devboard-specific connection settings and deployment instructions, see
 [Deploying Devboard](docs/devboard-deployment.md).
 
+## Initialize and deploy a ZIP
+
+The website detects a suggested container port before preparation; review and correct it. Existing ZIP projects offer **Upload ZIP & redeploy** to update the same environment and URL. CLI users can deploy a new reviewed ZIP with the same `--app` and `--environment`. GitHub links remain deployment-only. Automatic deployment on GitHub push is planned for GitHub projects only; ZIP updates are manual.
+
+
+```powershell
+# Local init uses your configured AI provider and the existing Scout checks.
+ebkit init --zip ./project.zip --output ./project-ebkit
+# Review ./project-ebkit/Dockerfile, then use the exported archive.
+ebkit deploy ./project-prepared.zip --reviewed --app my-app --region us-east-2 --port 8080 --env-file .env
+```
+
+For CLI users using the website operator's Gemini key, log in on the website and open **Deploy with CLI ? Copy CLI session token**. Configure:
+
+```powershell
+$env:EBKIT_SERVICE_URL = "https://YOUR-EBKIT-WEBSITE"
+$env:EBKIT_ACCESS_TOKEN = "YOUR-ACCOUNT-SESSION-TOKEN"
+ebkit init --zip ./project.zip
+```
+
+Hosted init tries Docker AI (Gordon) first, then Gemini if Gordon is unavailable or fails. It prints the provider and Dockerfile for explicit review before saving the prepared ZIP. The Gemini key stays on the server; users supply their account session, not an AI key. Use `http://127.0.0.1:8787` for this local website backend. Hosted ZIP init runs Docker Scout on source dependencies by default after generation, without an image build. A failed security gate exits with findings and remediation guidance. The explicit `--no-scout` option remains available and prints SECURITY NOT VERIFIED; bypassing does not fix CVEs.
+
+ZIP limits are 25 MB compressed, 200 MB expanded and 5,000 entries. Unsafe paths, links, duplicate names, encryption and excessive compression are rejected. One enclosing folder is flattened. Common `.env`/credential files and installed dependencies are omitted; review source for any other secrets before uploading. The original ZIP is unchanged. `--yes` does not bypass Dockerfile approval: ZIP deploy requires `--reviewed`, or an interactive review confirmation.
+
+CodeBuild builds ZIP source from private encrypted S3 storage. No local Docker build is needed. Source objects are deleted after the build, with a one-day lifecycle rule for abandoned objects; destroy removes the verified application-owned source bucket. ZIP deployment therefore needs scoped S3 permissions in addition to the existing build/deployment permissions. Databases, traffic and source/build resources may incur charges.
+
 ## Generate deployment files with `ebkit init`
 
-Run `ebkit init --path .` to prepare a local project or `ebkit init --repo URL` for
-a public GitHub repository. Init generates or validates deployment files, including
+Run `ebkit init --path .` for a local project or `ebkit init --zip project.zip` for
+a ZIP. GitHub links are deployment-only. Init generates or validates deployment files, including
 a root Dockerfile; it does not deploy the app or provision databases. Docker Scout
 scans source dependencies by default; local build/runtime verification is optional.
 
@@ -346,6 +372,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and pull 
 
 ## Current limitations
 
-- Deployment accepts public GitHub repositories with a root-level Dockerfile only. Local directories, prebuilt image tags, and Compose deployments are not supported.
+- Deployment accepts public GitHub repositories and reviewed project ZIPs with a root-level Dockerfile. Local directories, prebuilt image tags, and Compose deployments are not supported.
 - The application image should not bundle a local database for production. Use a managed database service; application-specific migrations and rollback are not automated.
 - Gemini is the only active AI provider for `ebkit init`.

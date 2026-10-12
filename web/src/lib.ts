@@ -14,6 +14,16 @@ export async function backend<T>(route: string, body: unknown): Promise<T> {
   if (!response.ok) throw new Error(data.error || 'Backend request failed.');
   return data as T;
 }
+export async function uploadZip(file: File): Promise<{uploadId:string;port:number}> {
+  const token=await insforge.getHttpClient().getValidAccessToken();
+  const response=await fetch('/api/uploads',{method:'POST',headers:{'Content-Type':'application/zip',Authorization:`Bearer ${token}`,'x-ebkit-filename':encodeURIComponent(file.name)},body:file});
+  const data=await response.json();if(!response.ok)throw new Error(data.error||'ZIP upload failed.');return data;
+}
+export async function downloadPreparedZip(uploadId:string,reviewHash:string):Promise<Blob> {
+  const token=await insforge.getHttpClient().getValidAccessToken();
+  const response=await fetch(`/api/uploads/${uploadId}/download`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({reviewed:true,reviewHash})});
+  if(!response.ok){const data=await response.json();throw new Error(data.error||'ZIP download failed.');}return response.blob();
+}
 export function parseRepository(input: string) {
   const match = input.trim().match(/^https:\/\/github\.com\/([\w-]+)\/([\w.-]+?)(?:\.git)?\/?$/);
   if (!match) throw new Error('Enter a public GitHub repository URL, such as https://github.com/owner/project.');

@@ -51,6 +51,7 @@ def _create_sample_config() -> DeploymentConfig:
 def isolated_local_tools(monkeypatch):
     """CLI unit tests must not contact real AI/Scout services."""
     monkeypatch.setattr(DockerAIService, "is_available", lambda _self: False)
+    monkeypatch.setattr(DockerAIService, '_generate_multitier_with_gemini', classmethod(lambda cls,*args: (None,'AI generation mocked; use the deterministic template.')))
     monkeypatch.setattr(DockerScoutValidator, "is_scout_available", lambda _self: False)
 
 
@@ -232,47 +233,14 @@ class TestInteractiveCLI:
         assert "FRONTEND_HOST_PORT=" in env_file
         assert ".env" in (sample_project / ".gitignore").read_text(encoding="utf-8")
 
-    def test_interactive_github_repo(self, sample_project: Path, monkeypatch, tmp_path: Path):
-        """Option 2 retains the clone and writes a complete Dockerfile at its root."""
-        config_file = tmp_path / "config"
-        monkeypatch.setenv("EBKIT_CONFIG_FILE", str(config_file))
-        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    def test_interactive_github_link_is_deployment_only(self, monkeypatch, tmp_path: Path):
         monkeypatch.chdir(tmp_path)
-
-        dummy_config = _create_sample_config()
-
-        runner = CliRunner()
-        github_url = "https://github.com/test-owner/test-repo"
-
-        def clone_into_destination(url: str, *, dest_dir: Path) -> Path:
-            shutil.copytree(sample_project, dest_dir, dirs_exist_ok=True)
-            return dest_dir
-
-        with patch("ebkit.commands.init.safe_clone_repo", side_effect=clone_into_destination) as mock_clone:
-            with patch.object(GoogleAIAnalyzer, "__init__", return_value=None):
-                with patch.object(GoogleAIAnalyzer, "analyze", return_value=dummy_config):
-                    # Inputs: Option 2 -> github_url -> Gemini (1)
-                    user_input = f"2\n{github_url}\n1\n"
-                    result = runner.invoke(
-                        init_command,
-                        ["--no-build", "--port", "8080"],
-                        input=user_input,
-                    )
-
-                    assert result.exit_code == 0, f"Error: {result.output}"
-                    assert "GitHub repository URL:" in result.output
-                    assert f"Cloning repository into {tmp_path / 'test-repo'}" in result.output
-                    assert "DEPLOYMENT FILES GENERATED" in result.output
-                    mock_clone.assert_called_once_with(
-                        github_url,
-                        dest_dir=tmp_path / "test-repo",
-                    )
-                    dockerfile = tmp_path / "test-repo" / "Dockerfile"
-                    assert dockerfile.is_file()
-                    dockerfile_content = dockerfile.read_text(encoding="utf-8")
-                    assert "FROM " in dockerfile_content
-                    assert "EXPOSE 8080" in dockerfile_content
-                    assert "CMD " in dockerfile_content
+        with patch('ebkit.repo_handler.safe_clone_repo') as clone:
+            result=CliRunner().invoke(init_command, input='2\n')
+        assert result.exit_code != 0
+        assert 'GitHub links are for deployment only' in result.output
+        assert 'review and push' in result.output
+        clone.assert_not_called()
 
     def test_github_repo_clone_does_not_overwrite_existing_folder(self, monkeypatch, tmp_path: Path):
         """GitHub init refuses to use an existing repository-named directory."""
@@ -283,14 +251,14 @@ class TestInteractiveCLI:
         existing_file.write_text("keep", encoding="utf-8")
 
         runner = CliRunner()
-        with patch("ebkit.commands.init.safe_clone_repo") as mock_clone:
+        with patch("ebkit.repo_handler.safe_clone_repo") as mock_clone:
             result = runner.invoke(
                 init_command,
                 ["--repo", "https://github.com/test-owner/test-repo", "--yes"],
             )
 
         assert result.exit_code != 0
-        assert "already exists" in result.output
+        assert "GitHub links are for deployment only" in result.output
         assert existing_file.read_text(encoding="utf-8") == "keep"
         mock_clone.assert_not_called()
 
@@ -375,7 +343,7 @@ class TestInteractiveCLI:
         runner = CliRunner()
         result = runner.invoke(init_command, input="2\nhttps://evil-site.com/exploit\n")
         assert result.exit_code != 0
-        assert "❌ Invalid GitHub repository URL:" in result.output
+        assert "GitHub links are for deployment only" in result.output
 
     def test_missing_gemini_key(self, sample_project: Path, monkeypatch, tmp_path: Path):
         """Selecting Gemini when GEMINI_API_KEY is missing prints clear message and exits."""
@@ -484,7 +452,7 @@ class TestInteractiveCLI:
         runner = CliRunner()
         result = runner.invoke(init_command, ["--yes"])
         assert result.exit_code != 0
-        assert "❌ Non-interactive mode requires a project path or repository." in result.output
+        assert "❌ Non-interactive mode requires --path or --zip." in result.output
 
     def test_non_interactive_with_path_succeeds(self, sample_project: Path, tmp_path: Path, monkeypatch):
         """Non-interactive mode with path and Gemini analyzer succeeds without prompts."""
