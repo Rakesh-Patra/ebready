@@ -16,7 +16,7 @@ beforeEach(() => { vi.clearAllMocks();api.getTrialAccount.mockResolvedValue({app
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 async function wizard() {
   const user = userEvent.setup(); render(<App/>);
-  await user.click(screen.getByRole('button', { name: /Switch to demo/ }));
+  await user.click(await screen.findByRole('button', { name: 'Explore demo' }));
   await user.click(await screen.findByRole('button', { name: /New deployment/ }));
   await user.type(screen.getByLabelText('GitHub repository URL'), 'https://github.com/Rakesh-Patra/devboard.git');
   await user.click(screen.getByRole('checkbox'));
@@ -26,6 +26,8 @@ async function wizard() {
 describe('deployment dashboard', () => {
   it('requires the root Dockerfile acknowledgement', async () => {
     const user = userEvent.setup(); render(<App/>);
+    await user.click(await screen.findByRole('button',{name:'Explore demo'}));
+    await user.click(screen.getByRole('button',{name:/Switch to live/}));
     await user.click(screen.getByRole('button', { name: /New deployment/ }));
     await user.type(screen.getByLabelText('GitHub repository URL'), 'https://github.com/a/b');
     expect(screen.queryByRole('button', { name: /Check repository & continue/ })).toBeNull();
@@ -46,6 +48,8 @@ describe('deployment dashboard', () => {
   it('shows repository errors and stays on the first step', async () => {
     api.backend.mockRejectedValueOnce(new Error('No root Dockerfile found.'));
     const user = userEvent.setup(); render(<App/>);
+    await user.click(await screen.findByRole('button',{name:'Explore demo'}));
+    await user.click(screen.getByRole('button',{name:/Switch to live/}));
     await user.click(screen.getByRole('button', { name: /New deployment/ }));
     await user.type(screen.getByLabelText('GitHub repository URL'), 'https://github.com/owner/repository'); await user.click(screen.getByRole('checkbox'));
     await user.click(screen.getByRole('button', { name: /Check repository & continue/ }));
@@ -54,6 +58,8 @@ describe('deployment dashboard', () => {
   });
   it('requires login before the live deploy action', async () => {
     const user = userEvent.setup(); render(<App/>);
+    await user.click(await screen.findByRole('button',{name:'Explore demo'}));
+    await user.click(screen.getByRole('button',{name:/Switch to live/}));
     await user.click(screen.getByRole('button', { name: /New deployment/ }));
     await user.type(screen.getByLabelText('GitHub repository URL'), 'https://github.com/owner/repository'); await user.click(screen.getByRole('checkbox'));
     await user.click(screen.getByRole('button', { name: /Check repository & continue/ }));
@@ -70,6 +76,8 @@ describe('deployment dashboard', () => {
   it('prefills required database names and hides deploy until supplied', async () => {
     api.backend.mockResolvedValueOnce({environment:[{name:'POSTGRES_URL',required:true,source:'.env.example'}],environmentScanComplete:true});
     const user=userEvent.setup();render(<App/>);
+    await user.click(await screen.findByRole('button',{name:'Explore demo'}));
+    await user.click(screen.getByRole('button',{name:/Switch to live/}));
     await user.click(screen.getByRole('button',{name:/New deployment/}));
     await user.type(screen.getByLabelText('GitHub repository URL'),'https://github.com/owner/devboard');
     await user.click(screen.getByRole('checkbox'));
@@ -106,13 +114,15 @@ describe('deployment dashboard', () => {
   });
   it('starts Google sign-in with the exact application origin', async () => {
     api.auth.signInWithOAuth.mockResolvedValue({ error: null }); render(<App/>);
-    await userEvent.click(await screen.findByRole('button', { name: /Sign in with Google/ }));
+    await userEvent.click(await screen.findByRole('button',{name:'Log in'}));
+    await userEvent.click(screen.getByRole('button',{name:'Continue with Google'}));
     expect(api.auth.signInWithOAuth).toHaveBeenCalledWith('google', { redirectTo: `${window.location.origin}/` });
   });
   it('reports sign-in failures', async () => {
     api.auth.signInWithOAuth.mockResolvedValue({ error: new Error('Unavailable') }); render(<App/>);
-    await userEvent.click(await screen.findByRole('button', { name: /Sign in with Google/ }));
-    expect(screen.getByRole('status').textContent).toMatch(/could not start/);
+    await userEvent.click(await screen.findByRole('button',{name:'Log in'}));
+    await userEvent.click(screen.getByRole('button',{name:'Continue with Google'}));
+    expect(screen.getByRole('alert').textContent).toContain('Unavailable');
   });
   it('loads bounded project metadata for a signed-in user', async () => {
     api.auth.getCurrentUser.mockResolvedValue({ data: { user: { id: 'owner', email: 'test@example.test' } }, error: null });
@@ -149,7 +159,7 @@ describe('deployment dashboard', () => {
     render(<App/>); await screen.findByText('Signed in');
     const listener = api.auth.onAuthStateChange.mock.calls[0][0] as unknown as (event: string) => void;
     await act(async () => listener('signedOut'));
-    expect(await screen.findByRole('button', { name: /Sign in with Google/ })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Log in' })).toBeTruthy();
   });
   async function failedProject(status = 'failed', repository = 'https://github.com/a/b') {
     api.auth.getCurrentUser.mockResolvedValue({ data: { user: { id: 'owner' } }, error: null });
@@ -234,7 +244,7 @@ it('ZIP wizard requires Dockerfile review and environment values before enabling
 });
 
 it('shows the 30-minute approved trial and the Rs49 coming-soon pass without checkout',async()=>{
- render(<App/>);await userEvent.click(screen.getByRole('button',{name:'Pricing'}));
+ render(<App/>);await userEvent.click(screen.getByRole('link',{name:'Pricing'}));
  expect(screen.getByText('30 minutes from Ready / Green.')).toBeTruthy();expect(screen.getByText(String.fromCharCode(8377)+'49')).toBeTruthy();
  expect((screen.getByRole('button',{name:'Coming soon'}) as HTMLButtonElement).disabled).toBe(true);
  expect(api.backend).not.toHaveBeenCalled();
@@ -247,4 +257,18 @@ it('provides a header sign-out control for the mobile layout',async()=>{
  render(<App/>);await screen.findByText('Signed in');
  await userEvent.click(screen.getByRole('button',{name:'Sign out of account'}));
  expect(api.auth.signOut).toHaveBeenCalledOnce();expect(await screen.findByRole('button',{name:'Log in'})).toBeTruthy();
+});
+
+it('opens a public landing page without workspace statistics for signed-out visitors',async()=>{
+ render(<App/>);await screen.findByRole('button',{name:'Explore demo'});
+ expect(screen.getByRole('heading',{name:/Your code/})).toBeTruthy();
+ expect(screen.queryByText('Total projects')).toBeNull();expect(screen.queryByRole('button',{name:'Activity'})).toBeNull();
+ expect(screen.queryByRole('button',{name:/New deployment/})).toBeNull();expect(api.database.from).not.toHaveBeenCalled();
+ await userEvent.click(screen.getByRole('button',{name:'Start free trial'}));
+ expect(screen.getByRole('dialog',{name:'Create your account.'})).toBeTruthy();
+});
+it('enters guest simulation only after choosing Explore demo',async()=>{
+ render(<App/>);await userEvent.click(await screen.findByRole('button',{name:'Explore demo'}));
+ expect(screen.getByRole('button',{name:/Switch to live/})).toBeTruthy();expect(screen.getByText('Total projects')).toBeTruthy();
+ expect(api.backend).not.toHaveBeenCalled();expect(api.database.from).not.toHaveBeenCalled();
 });

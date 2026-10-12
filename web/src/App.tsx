@@ -3,6 +3,7 @@ import { AuthChangeEvent } from '@insforge/sdk';
 import { ArrowUpRight, ArrowRight, Boxes, Check, ChevronRight, Cloud, Code2, Copy, Download, ExternalLink, FolderGit2, Github, Globe, LayoutDashboard, LogOut, Moon, Sun, Plus, RefreshCw, Search, Settings2, ShieldCheck, Terminal, Trash2, X, Zap } from 'lucide-react';
 import { backend, columns, insforge, message, parseEnv, parseRepository, type Project, getTrialAccount, type TrialAccount } from './lib';
 import TrialCountdown,{trialExpired} from './TrialCountdown';
+import Landing from './Landing';
 import AuthDialog from './AuthDialog';
 import ZipSource, {type PreparedZip} from './ZipSource';
 
@@ -21,6 +22,7 @@ export default function App() {
   }, [theme]);
 
   const [user, setUser] = useState<User | null>(null), [authLoading, setAuthLoading] = useState(true);
+  const [guestWorkspace,setGuestWorkspace]=useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'signup' | null>(null), [deploymentMode, setDeploymentMode] = useState<'live' | 'demo'>('live');
   const [trialAccount,setTrialAccount]=useState<TrialAccount|null>(null),[trialError,setTrialError]=useState('');
   useEffect(()=>{let cancelled=false;setTrialAccount(null);setTrialError('');if(user)getTrialAccount().then(account=>{if(!cancelled)setTrialAccount(account);}).catch(error=>{if(!cancelled)setTrialError(message(error));});return()=>{cancelled=true;};},[user?.id]);
@@ -43,7 +45,7 @@ export default function App() {
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]), mounted = useRef(true);
 
   useEffect(() => { mounted.current = true; const unsubscribe = insforge.auth.onAuthStateChange(event => {
-    if (event === AuthChangeEvent.SIGNED_OUT && mounted.current) { setUser(null); setWizard(false); setSelected(null); }
+    if (event === AuthChangeEvent.SIGNED_OUT && mounted.current) { setUser(null);setGuestWorkspace(false);setView('projects'); setWizard(false); setSelected(null); }
   }); insforge.auth.getCurrentUser().then(({ data, error }) => {
     if (mounted.current) { setUser(error ? null : (data?.user as User ?? null)); setAuthLoading(false); }
   }).catch(() => { if (mounted.current) setAuthLoading(false); }); return () => { mounted.current = false; unsubscribe(); }; }, []);
@@ -85,8 +87,8 @@ export default function App() {
     setTimeout(() => URL.revokeObjectURL(url), 1000); setToast('Logs downloaded. Review them before sharing.');
   }
   async function signIn() { setBusy(true); try { const { error } = await insforge.auth.signInWithOAuth('google', { redirectTo: `${window.location.origin}/` }); if (error) throw error; } catch { setToast('Google sign-in could not start. Please try again.'); } finally { setBusy(false); } }
-  async function signOut() { const { error } = await insforge.auth.signOut(); if (error) { setToast('Could not sign out. Try again.'); return; } setUser(null); setWizard(false); }
-  async function authenticated() { const { data, error } = await insforge.auth.getCurrentUser(); if (error || !data?.user) throw new Error('Could not load your session. Please log in again.'); setUser(data.user as User); }
+  async function signOut() { const { error } = await insforge.auth.signOut(); if (error) { setToast('Could not sign out. Try again.'); return; } setUser(null);setGuestWorkspace(false);setView('projects'); setWizard(false); }
+  async function authenticated() { const { data, error } = await insforge.auth.getCurrentUser(); if (error || !data?.user) throw new Error('Could not load your session. Please log in again.'); setUser(data.user as User);setGuestWorkspace(false); }
   function openWizard() { setZipUpdateTarget(null);setSourceMode('github');setPreparedZip(null);setRepository(''); setName(''); setRegion('us-east-2'); setPort(8080); setVariableNames(''); setDetectedEnvironment([]); setEnvironmentScanComplete(true); setStep(1); setConfirmed(false); setCostConfirmed(false); setFormError(''); setWizard(true); }
   function deployAgain(project: Project) {
     openWizard(); setSelected(null); setDeploymentMode('live');
@@ -143,6 +145,7 @@ export default function App() {
   const shown = projects.filter(project => `${project.name} ${project.repository}`.toLowerCase().includes(search.toLowerCase()));
   const ready = projects.filter(project => project.status === 'ready').length;
 
+  if(!user&&!guestWorkspace)return <><Landing theme={theme} toggleTheme={()=>setTheme(previous=>previous==='dark'?'light':'dark')} login={()=>setAuthMode('login')} signup={()=>setAuthMode('signup')} demo={()=>{setGuestWorkspace(true);setDeploymentMode('demo');setView('projects');}} loading={authLoading}/>{authMode&&<AuthDialog initialMode={authMode} close={()=>setAuthMode(null)} authenticated={authenticated}/>}{toast&&<div className="toast" role="status">{toast}<button aria-label="Dismiss message" onClick={()=>setToast('')}><X size={15}/></button></div>}</>;
   return <div className="app-shell">
     <aside className="sidebar"><a className="brand" href="/" aria-label="EBKit home"><span className="brand-mark"><Boxes size={21}/></span>EBKit<span className="brand-beta">BETA</span></a>
       <div className="workspace"><span className="workspace-avatar">E</span><div>Personal workspace<small>{user ? 'InsForge connected' : 'Explore the demo'}</small></div></div>

@@ -148,3 +148,26 @@ footer{font-size:11px;color:var(--copy)}
 }
 
 .inline-help{margin:0 0 18px;font-size:12px;color:var(--copy)}.inline-help summary,.detected-settings summary{cursor:pointer;font-weight:500;min-height:28px}.inline-help p{font-size:12px;line-height:1.7;margin:8px 0}.detected-settings[open]{padding-bottom:16px}@media(max-width:760px){.inline-help summary,.detected-settings summary{min-height:44px;align-content:center}}
+
+/* Public entry: account controls and product context before the workspace. */
+.landing{min-height:100dvh;background:var(--canvas);color:var(--ink)}
+.landing-nav{max-width:1200px;margin:auto;padding:24px 32px;display:flex;align-items:center;gap:32px;border-bottom:1px solid var(--line)}
+.landing-nav>nav{display:flex;gap:24px;margin-left:auto;font-size:13px;color:var(--copy)}
+.landing-account{display:flex;align-items:center;gap:10px}
+.landing-main{width:100%;max-width:1200px;margin:0 auto;padding:0 32px}
+.landing-hero{display:grid;grid-template-columns:1.1fr 1fr;gap:72px;align-items:center;padding:86px 0 76px}
+.landing-hero h1{font-size:clamp(38px,5vw,64px);line-height:1.08;letter-spacing:-2px;margin:18px 0 24px}
+.landing-hero h1 span{color:var(--orange)}
+.landing-description{max-width:420px;font-size:16px;line-height:1.8;color:var(--copy)}
+.landing-actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}
+.landing-caption{font-size:12px;color:var(--copy);margin-top:17px}
+.landing-preview{background:var(--surface);border:1px solid var(--line);border-radius:20px;min-width:0;overflow:hidden}
+.landing-preview-header{display:flex;align-items:center;gap:14px;padding:24px;border-bottom:1px solid var(--line)}
+.landing-preview strong{display:block;font-size:14px}.landing-preview small{display:block;font-size:12px;color:var(--copy);margin-top:6px}
+.landing-preview ol{list-style:none;padding:12px 24px;margin:0}.landing-preview li{display:flex;align-items:center;gap:16px;padding:22px 0}.landing-preview li>span{font-size:11px;color:var(--copy)}.landing-preview li>svg{color:var(--orange);flex-shrink:0}
+.landing-preview-foot{display:flex;align-items:center;gap:9px;padding:18px 24px;border-top:1px solid var(--line);font-size:11px;color:var(--copy);background:var(--subtle)}
+.landing-pricing{padding:30px 0 55px;scroll-margin-top:24px}.landing-pricing .section-heading>span{font-size:12px;color:var(--copy)}.landing-pricing h3{font-size:20px;margin:20px 0 0}.landing-pricing .pricing-card p{font-size:13px;color:var(--copy);line-height:1.8}.landing-pricing .price{margin:15px 0}.landing-pricing .button{margin-top:15px}
+.landing footer{padding:24px 0 30px;margin-top:0;gap:24px}.landing footer .brand{font-size:17px}.landing footer>a:last-child{display:flex;align-items:center;gap:8px}
+@media(max-width:900px){.landing-hero{gap:32px;padding:60px 0}.landing-nav{gap:20px}}
+@media(max-width:700px){.landing-nav{padding:18px 20px;flex-wrap:wrap;gap:16px}.landing-nav .brand{font-size:23px}.landing-account{margin-left:auto}.landing-nav>nav{order:3;flex-basis:100%;margin:0}.landing-main{padding:0 20px}.landing-hero{grid-template-columns:1fr;padding:46px 0 30px;gap:30px}.landing-hero h1{font-size:46px}.landing-description{font-size:15px}.landing-pricing{padding-top:22px}.landing footer{flex-wrap:wrap}.landing footer>span{flex-basis:100%;order:3;line-height:1.8}.landing-preview-foot{line-height:1.7}}
+@media(max-width:390px){.landing-account{gap:6px}.landing-account .button{padding:9px 10px;font-size:11px}.landing-nav{padding:16px}.landing-nav .brand{font-size:21px;gap:7px}.landing-nav .brand-mark{width:30px;height:30px}.landing-main{padding:0 16px}.landing-hero h1{font-size:40px}.landing-preview-header{padding:20px}.landing-preview ol{padding:8px 20px}.landing-preview-foot{padding:16px 20px}}
