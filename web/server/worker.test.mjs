@@ -96,3 +96,13 @@ it('rejects missing detected database settings before any insert or cloud spawn'
  expect(response.status).toBe(400);expect((await response.json()).error).toContain('POSTGRES_URL');
  expect(spawn).not.toHaveBeenCalled();expect(from).not.toHaveBeenCalled();
 });
+
+it('rejects signed-out or expired sessions on every cloud endpoint before any AWS action',async()=>{
+ const spawn=vi.fn(),from=vi.fn(),inspectZip=vi.fn(),githubRequest=vi.fn();
+ const url=await serve({trialsEnabled:false,liveEnabled:true,allowedEmails:['owner@example.test']},{admin:{database:{from}},spawn,inspectZip,fetch:githubRequest,authenticate:async()=>{throw new Error('expired session');}});
+ const routes=['/api/deploy','/api/trial','/api/uploads',`/api/uploads/${project.id}/prepare`,`/api/uploads/${project.id}/download`,...['deploy','rollback','scale','destroy','status','logs','versions','resources','cleanup-status'].map(op=>`/api/projects/${project.id}/${op}`)];
+ for(const route of routes)for(const headers of [{},{Authorization:'Bearer expired-session'},{Authorization:'Bearer null'}]){
+  const response=await post(url+route,{...project,confirmCosts:true,confirmation:project.environment_name},headers);expect(response.status).toBe(401);
+ }
+ expect(spawn).not.toHaveBeenCalled();expect(from).not.toHaveBeenCalled();expect(inspectZip).not.toHaveBeenCalled();expect(githubRequest).not.toHaveBeenCalled();
+});

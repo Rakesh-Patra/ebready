@@ -27,7 +27,6 @@ describe('deployment dashboard', () => {
   it('requires the root Dockerfile acknowledgement', async () => {
     const user = userEvent.setup(); render(<App/>);
     await user.click(await screen.findByRole('button',{name:'Explore demo'}));
-    await user.click(screen.getByRole('button',{name:/Switch to live/}));
     await user.click(screen.getByRole('button', { name: /New deployment/ }));
     await user.type(screen.getByLabelText('GitHub repository URL'), 'https://github.com/a/b');
     expect(screen.queryByRole('button', { name: /Check repository & continue/ })).toBeNull();
@@ -49,35 +48,23 @@ describe('deployment dashboard', () => {
     api.backend.mockRejectedValueOnce(new Error('No root Dockerfile found.'));
     const user = userEvent.setup(); render(<App/>);
     await user.click(await screen.findByRole('button',{name:'Explore demo'}));
-    await user.click(screen.getByRole('button',{name:/Switch to live/}));
     await user.click(screen.getByRole('button', { name: /New deployment/ }));
     await user.type(screen.getByLabelText('GitHub repository URL'), 'https://github.com/owner/repository'); await user.click(screen.getByRole('checkbox'));
     await user.click(screen.getByRole('button', { name: /Check repository & continue/ }));
     expect(screen.getByRole('alert').textContent).toContain('No root Dockerfile found.');
     expect(screen.getByRole('dialog', { name: 'Start with your repository.' })).toBeTruthy();
   });
-  it('requires login before the live deploy action', async () => {
-    const user = userEvent.setup(); render(<App/>);
-    await user.click(await screen.findByRole('button',{name:'Explore demo'}));
-    await user.click(screen.getByRole('button',{name:/Switch to live/}));
-    await user.click(screen.getByRole('button', { name: /New deployment/ }));
-    await user.type(screen.getByLabelText('GitHub repository URL'), 'https://github.com/owner/repository'); await user.click(screen.getByRole('checkbox'));
-    await user.click(screen.getByRole('button', { name: /Check repository & continue/ }));
-    expect(screen.queryByRole('button', { name: 'Log in to start trial' })).toBeNull();
-    await user.click(screen.getByRole('checkbox', { name: /billable AWS resources/ }));
-    expect(screen.getByRole('button', { name: 'Log in to start trial' })).toBeTruthy();
-    await user.click(screen.getByRole('checkbox', { name: /billable AWS resources/ }));
-    expect(screen.queryByRole('button', { name: 'Log in to start trial' })).toBeNull();
-    await user.click(screen.getByRole('checkbox', { name: /billable AWS resources/ }));
-    await user.click(screen.getByRole('button', { name: 'Log in to start trial' }));
-    expect(screen.getByRole('dialog', { name: 'Welcome back.' })).toBeTruthy();
-    expect(api.backend.mock.calls.map(call => call[0])).toEqual(['/api/repository']);
+  it('keeps guests in demo mode and opens login instead of enabling AWS',async()=>{
+    render(<App/>);const user=userEvent.setup();await user.click(await screen.findByRole('button',{name:'Explore demo'}));
+    await user.click(screen.getByRole('button',{name:/Log in for AWS/}));
+    expect(screen.getByRole('dialog',{name:'Welcome back.'})).toBeTruthy();
+    expect(screen.queryByRole('button',{name:/LIVE AWS/})).toBeNull();expect(api.backend).not.toHaveBeenCalled();
   });
   it('prefills required database names and hides deploy until supplied', async () => {
     api.backend.mockResolvedValueOnce({environment:[{name:'POSTGRES_URL',required:true,source:'.env.example'}],environmentScanComplete:true});
-    const user=userEvent.setup();render(<App/>);
-    await user.click(await screen.findByRole('button',{name:'Explore demo'}));
-    await user.click(screen.getByRole('button',{name:/Switch to live/}));
+    api.auth.getCurrentUser.mockResolvedValue({data:{user:{id:'owner',email:'owner@example.test'}},error:null});
+    api.database.from.mockReturnValue({select:()=>({order:()=>({limit:async()=>({data:[],error:null})})})});
+    const user=userEvent.setup();render(<App/>);await screen.findByText('Signed in');
     await user.click(screen.getByRole('button',{name:/New deployment/}));
     await user.type(screen.getByLabelText('GitHub repository URL'),'https://github.com/owner/devboard');
     await user.click(screen.getByRole('checkbox'));
@@ -85,11 +72,11 @@ describe('deployment dashboard', () => {
     const input=screen.getByRole('textbox',{name:/Application environment/});
     expect((input as HTMLTextAreaElement).value).toBe('POSTGRES_URL=');
     await user.click(screen.getByRole('checkbox',{name:/billable AWS resources/}));
-    expect(screen.queryByRole('button',{name:'Log in to start trial'})).toBeNull();
+    expect(screen.queryByRole('button',{name:'Deploy to AWS'})).toBeNull();
     await user.type(input,'postgresql://user:password@host/database');
-    expect(screen.getByRole('button',{name:'Log in to start trial'})).toBeTruthy();
+    expect(screen.getByRole('button',{name:'Deploy to AWS'})).toBeTruthy();
     await user.clear(input);
-    expect(screen.queryByRole('button',{name:'Log in to start trial'})).toBeNull();
+    expect(screen.queryByRole('button',{name:'Deploy to AWS'})).toBeNull();
     expect(api.backend).toHaveBeenCalledTimes(1);
   });
   it('rejects real secret values entered in the name-only field', async () => {
@@ -269,6 +256,6 @@ it('opens a public landing page without workspace statistics for signed-out visi
 });
 it('enters guest simulation only after choosing Explore demo',async()=>{
  render(<App/>);await userEvent.click(await screen.findByRole('button',{name:'Explore demo'}));
- expect(screen.getByRole('button',{name:/Switch to live/})).toBeTruthy();expect(screen.getByText('Total projects')).toBeTruthy();
+ expect(screen.getByRole('button',{name:/Log in for AWS/})).toBeTruthy();expect(screen.getByText('Total projects')).toBeTruthy();
  expect(api.backend).not.toHaveBeenCalled();expect(api.database.from).not.toHaveBeenCalled();
 });

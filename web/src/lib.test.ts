@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
-vi.mock('@insforge/sdk', () => ({ createClient: () => ({}) }));
-import { parseEnv, parseRepository } from './lib';
+import {beforeEach, describe, expect, it, vi } from 'vitest';
+const auth=vi.hoisted(()=>({getCurrentUser:vi.fn(),getValidAccessToken:vi.fn()}));
+vi.mock('@insforge/sdk',()=>({createClient:()=>({auth:{getCurrentUser:auth.getCurrentUser},getHttpClient:()=>({getValidAccessToken:auth.getValidAccessToken})})}));
+beforeEach(()=>{vi.clearAllMocks();auth.getCurrentUser.mockResolvedValue({data:{user:null},error:null});vi.stubGlobal('fetch',vi.fn());});
+import {backend,uploadZip,downloadPreparedZip, parseEnv, parseRepository } from './lib';
 
 describe('repository validation', () => {
   it('normalizes GitHub clone URLs', () => {
@@ -18,4 +20,17 @@ describe('local .env import', () => {
     expect(() => parseEnv('BAD-NAME=secret')).toThrow();
     expect(() => parseEnv('secret without a name')).toThrow();
   });
+});
+
+describe('cloud session enforcement',()=>{
+ it('does not send protected requests after sign-out',async()=>{
+  await expect(backend('/api/deploy',{})).rejects.toThrow('Log in');
+  await expect(uploadZip({name:'project.zip'} as File)).rejects.toThrow('Log in');
+  await expect(downloadPreparedZip('upload','hash')).rejects.toThrow('Log in');
+  expect(fetch).not.toHaveBeenCalled();expect(auth.getValidAccessToken).not.toHaveBeenCalled();
+ });
+ it('rejects a cached user without an access token before contacting the backend',async()=>{
+  auth.getCurrentUser.mockResolvedValue({data:{user:{id:'owner'}},error:null});auth.getValidAccessToken.mockResolvedValue(null);
+  await expect(backend('/api/projects/owned/deploy',{})).rejects.toThrow('session has ended');expect(fetch).not.toHaveBeenCalled();
+ });
 });

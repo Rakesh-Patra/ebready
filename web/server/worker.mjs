@@ -81,8 +81,9 @@ export async function createWorker(config, dependencies = {}) {
   async function authorized(req) {
     if (!config.liveEnabled || !admin) throw new HttpError(503, 'Live deployment worker is not configured.');
     const token = req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];
-    if (!token) throw new HttpError(401, 'Log in to continue.');
-    const user = await authenticate(token);
+    if (!token||['null','undefined'].includes(token)||token.length>8192) throw new HttpError(401, 'Log in to continue.');
+    let user;try{user=await authenticate(token);}catch{throw new HttpError(401,'Your session is invalid or expired. Log in again.');}
+    if(!user?.id)throw new HttpError(401,'Log in to continue.');
     if (!config.allowedEmails.includes(user.email?.toLowerCase())) throw new HttpError(403, 'This account is not enabled for deployments on this AWS account.');
     return user;
   }
