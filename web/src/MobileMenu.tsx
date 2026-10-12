@@ -1,0 +1,9 @@
+import {useEffect,useRef,useState} from 'react';
+import {LogOut,Menu,Moon,Sun} from 'lucide-react';
+export default function MobileMenu({theme,onTheme,email,onLogin,onSignup,onLogout,onMode,mode,links=[]}:{theme:'light'|'dark';onTheme:()=>void;email?:string;onLogin:()=>void;onSignup:()=>void;onLogout?:()=>void;onMode?:()=>void;mode?:'live'|'demo';links?:Array<{label:string;href:string}>}){
+  const ref=useRef<HTMLDetailsElement>(null);
+  const [open,setOpen]=useState(false);
+  function act(action:()=>void){if(ref.current)ref.current.open=false;action();}
+  useEffect(()=>{const outside=(event:PointerEvent)=>{if(ref.current&&!ref.current.contains(event.target as Node))ref.current.open=false;};const escape=(event:KeyboardEvent)=>{if(event.key==='Escape'&&ref.current?.open){ref.current.open=false;ref.current.querySelector('summary')?.focus();}};document.addEventListener('pointerdown',outside);document.addEventListener('keydown',escape);return()=>{document.removeEventListener('pointerdown',outside);document.removeEventListener('keydown',escape);};},[]);
+  return <details className="mobile-menu" ref={ref} onToggle={event=>setOpen(event.currentTarget.open)}><summary aria-label="Open navigation menu"><Menu size={22}/></summary>{open&&<div className="mobile-menu-panel">{email&&<p className="mobile-menu-account">{email}</p>}{links.map(link=><a key={link.label} href={link.href} onClick={()=>{if(ref.current)ref.current.open=false;}}>{link.label}</a>)}<button onClick={()=>act(onTheme)}>{theme==='dark'?<Sun size={17}/>:<Moon size={17}/>}Use {theme==='dark'?'light':'dark'} mode</button>{onMode&&<button onClick={()=>act(onMode)}>{onLogout?`Switch to ${mode==='live'?'demo':'live'}`:'Log in for AWS'}</button>}{onLogout?<button onClick={()=>act(onLogout)}><LogOut size={17}/>Sign out</button>:<><button onClick={()=>act(onLogin)}>Log in</button><button onClick={()=>act(onSignup)}>Create account</button></>}</div>}</details>;
+}
