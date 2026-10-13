@@ -34,6 +34,12 @@ it('selects an operator-approved credentials profile',async()=>{
  expect(action).toHaveBeenCalledWith(project,'health',{profile:'operator',confirmation:''});
 });
 
+it('uses the selected credentials profile for production operations',async()=>{
+ const action=vi.fn(async()=>{}),user=userEvent.setup();render(<CloudControls project={project} projects={[project]} privileged busy={false} onAction={action}/>);
+ await user.selectOptions(await screen.findByLabelText('AWS credentials profile'),'operator');await user.click(screen.getByRole('button',{name:'Run production operation'}));
+ expect(action).toHaveBeenCalledWith(project,'production',{action:'metrics',configuration:{hours:24},confirmation:'',profile:'operator'});
+});
+
 it('keeps monitoring scheduled across parent renders and uses the latest callback',async()=>{
  const first=vi.fn(async()=>{}),second=vi.fn(async()=>{});
  const view=render(<CloudControls project={project} projects={[project]} privileged busy={false} onAction={first}/>);

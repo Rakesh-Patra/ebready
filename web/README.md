@@ -223,5 +223,6 @@ Saved AWS configuration templates support Standard environments only; Cluster se
 Optional `EBKIT_AWS_PROFILES=development,operations` enables named profiles in Cloud controls.
 Set `EBKIT_AWS_ACCOUNT_ID` to the operator's 12-digit account ID too. Only these profile names are
 accepted, and CLI STS checks reject credentials for another account before environment operations.
-Profiles choose credentials for an action in the same account, not a different user's AWS account.
-No credentials are accepted from the browser or stored in project metadata.
+The selected profile is used for Cloud controls, including production operations. Profiles choose
+credentials for an action in the same account, not a different user's AWS account. No credentials
+are accepted from the browser or stored in project metadata.

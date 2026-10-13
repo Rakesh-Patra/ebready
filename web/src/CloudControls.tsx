@@ -17,7 +17,7 @@ export default function CloudControls({project,projects,privileged,busy,onAction
  }
  return <section className="cloud-controls" aria-label="Cloud controls">
   <h3>Cloud controls</h3>
-  <OperationsPanel project={project} privileged={privileged} busy={busy} onAction={onAction}/>
+  <OperationsPanel project={project} privileged={privileged} busy={busy} profile={profile} onAction={onAction}/>
   {profiles.length>0&&<label>AWS credentials profile<select value={profile} onChange={event=>setProfile(event.target.value)}><option value="">Operator default</option>{profiles.map(value=><option key={value}>{value}</option>)}</select></label>}
   <div className="detail-buttons"><button className="button" disabled={blocked} onClick={()=>void act('health')}>Detailed health</button><button className="button" disabled={blocked} onClick={()=>void act('events')}>Deployment events</button><button className="button" disabled={blocked} onClick={()=>void act('config')}>List variable names</button><button className="button" disabled={blocked} onClick={()=>void act('options')}>List environment options</button></div>
   <label>Refresh monitoring<select value={refresh} onChange={event=>setRefresh(event.target.value)}><option value="">Off</option><option value="health">Health every 30 seconds</option><option value="events">Events every 30 seconds</option></select></label>
