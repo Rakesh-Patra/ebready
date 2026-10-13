@@ -8,7 +8,7 @@ import path from 'node:path';
 import { createClient, createAdminClient } from '@insforge/sdk';
 import { atomicJSON, readJSON, pendingJobs, lockJobs, alive, removeJobDirectory } from './jobs.mjs';
 import { createUploads } from './uploads.mjs';
-import {createTrials,trialColumns} from './trials.mjs';
+import {createTrials,isTimedPlan,trialColumns} from './trials.mjs';
 import {createGithubDeploys} from './github-deploys.mjs';
 
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
@@ -37,7 +37,7 @@ export async function validateRepository(input, request = fetch) {
 
 export function commandArguments(operation, project, body = {}) {
   const target = ['--app', project.application_name, '--environment', project.environment_name, '--region', project.region];
-  if (operation === 'deploy') return ['-m', 'ebkit.cli', 'deploy', body.sourceArchive || project.repository, ...target, '--port', String(project.port), '--yes', ...(project.plan==='free_trial'?['--max-replicas','1']:[]), ...(body.sourceArchive ? ['--reviewed'] : []), ...(body.githubCommit ? ['--commit', body.githubCommit] : [])];
+  if (operation === 'deploy') return ['-m', 'ebkit.cli', 'deploy', body.sourceArchive || project.repository, ...target, '--port', String(project.port), '--yes', ...(isTimedPlan(project.plan)?['--max-replicas','1']:[]), ...(body.sourceArchive ? ['--reviewed'] : []), ...(body.githubCommit ? ['--commit', body.githubCommit] : [])];
   if (operation === 'scale') {
     if (!Number.isInteger(body.replicas) || body.replicas < 1 || body.replicas > 100) throw new HttpError(400, 'Replica count must be between 1 and 100.');
     return ['-m', 'ebkit.cli', 'scale', ...target, '--min', String(body.replicas), '--max', String(body.replicas), '--yes'];
@@ -74,7 +74,7 @@ export function commandArguments(operation, project, body = {}) {
   }
   if(operation==='clone'){
     if(!/^[-A-Za-z0-9]{3,40}$/.test(body.sourceEnvironment??''))throw new HttpError(400,'Invalid clone source.');
-    return ['-m','ebkit.cli','clone','--app',project.application_name,'--environment',body.sourceEnvironment,'--region',project.region,'--name',project.environment_name,'--yes',...(project.plan==='free_trial'?['--max-replicas','1']:[])];
+    return ['-m','ebkit.cli','clone','--app',project.application_name,'--environment',body.sourceEnvironment,'--region',project.region,'--name',project.environment_name,'--yes',...(isTimedPlan(project.plan)?['--max-replicas','1']:[])];
   }
   if (operation === 'destroy' && body.confirmation !== project.environment_name) throw new HttpError(400, 'Type the exact environment name to confirm destruction.');
   if (!['status','logs','versions','resources','cleanup-status','destroy','health','events'].includes(operation)) throw new HttpError(404, 'Unknown operation.');
@@ -107,7 +107,7 @@ export async function createWorker(config, dependencies = {}) {
   const release = recover ? await lockJobs(directoryRoot) : async () => {};
   let launches = 0, zipReplacing = false;
   const replacementAuthorization=Symbol('ZIP replacement');
-  const trials=config.trialsEnabled!==false&&config.liveEnabled&&admin?createTrials({admin,save,run,isBusy:()=>running.size>0||zipReplacing,capacity:config.globalCapacity??2,testingEmails:config.testingEmails??[],evaluatorEmails:config.evaluatorEmails??[],now:dependencies.now??Date.now}):null;
+  const trials=config.trialsEnabled!==false&&config.liveEnabled&&admin?createTrials({admin,save,run,isBusy:()=>running.size>0||zipReplacing,capacity:config.globalCapacity??2,testingEmails:config.testingEmails??[],evaluatorEmails:config.evaluatorEmails??[],paidTestEmails:config.paidTestEmails??[],allowedEmails:config.allowedEmails??[],now:dependencies.now??Date.now}):null;
   const githubDeploys=config.githubAutoDeploy!==false&&config.liveEnabled&&admin?createGithubDeploys({
     directory:directoryRoot,request:dependencies.fetch,token:config.githubToken,
     isBusy:()=>closing||running.size>0||zipReplacing,
@@ -149,7 +149,7 @@ export async function createWorker(config, dependencies = {}) {
     if (running.size) throw new HttpError(409, 'Another cloud operation is running. Wait for it to finish.');
     if(body.profile&&(!(config.awsProfiles??[]).includes(body.profile)||!/^[-A-Za-z0-9_.]+$/.test(body.profile)||!/^\d{12}$/.test(config.awsAccountId??'')))throw new HttpError(403,'Choose a configured operator profile; the worker must have its AWS account ID configured.');
     const args = recovery ? [] : (dependencies.commandArguments ?? commandArguments)(operation, project, body);
-    const deadline=project.plan==='free_trial'?(['deploy','scale','rollback','clone'].includes(operation)?Math.min(Date.now()+7200000,Date.parse(project.trial_expires_at)):Date.now()+(['destroy'].includes(operation)?7200000:60000)):Date.now()+7200000;
+    const deadline=isTimedPlan(project.plan)?(['deploy','scale','rollback','clone'].includes(operation)?Math.min(Date.now()+7200000,Date.parse(project.trial_expires_at)):Date.now()+(['destroy'].includes(operation)?7200000:60000)):Date.now()+7200000;
     if(body.profile&&!recovery)args.splice(2,0,'--profile',body.profile);
     let envText = '', secrets = [];
     if (body.environment) {
@@ -228,8 +228,8 @@ export async function createWorker(config, dependencies = {}) {
           let record;
           try {const records=JSON.parse(await readFile(path.join(directoryRoot, `${project.id}.json`), 'utf8')).deployments??[];record=records.find(item=>item.environment_name===project.environment_name)??(records.length===1&&!records[0].environment_name?records[0]:undefined);} catch {}
           let healthy = !code && record?.status === 'Ready' && record?.health === 'Green' && record?.release_verification!=='failed';
-          if(project.plan==='free_trial'&&healthy){const deadline=await trials.start(project.id);Object.assign(changes,deadline);healthy=!!deadline.trial_started_at&&Date.parse(deadline.trial_expires_at)>Date.now();}
-          if(project.plan==='free_trial'&&!healthy)Object.assign(changes,{trial_cleanup_state:'pending',trial_cleanup_next_at:new Date().toISOString()});
+          if(isTimedPlan(project.plan)&&healthy){const deadline=await trials.start(project.id);Object.assign(changes,deadline);healthy=!!deadline.trial_started_at&&Date.parse(deadline.trial_expires_at)>Date.now();}
+          if(isTimedPlan(project.plan)&&!healthy)Object.assign(changes,{trial_cleanup_state:'pending',trial_cleanup_next_at:new Date().toISOString()});
           Object.assign(changes, { status: healthy ? 'ready' : 'failed', stage: healthy ? 6 : 2, health: record?.health ?? null, live_url: record?.url ?? project.live_url ?? null, revision: healthy && project.status === 'ready' ? project.revision + 1 : project.revision });
           if (!healthy && !code) changes.last_error = 'AWS did not report Ready / Green. Check status and logs; resources may still be running.';
         } else if (operation === 'status' && !code) {
@@ -242,10 +242,10 @@ export async function createWorker(config, dependencies = {}) {
         } else if (operation === 'destroy') {
           Object.assign(changes, { status: code===2?'destroying':code ? 'failed' : 'destroyed', live_url: null });
           if(code===2)changes.last_error=null;
-          if(project.plan==='free_trial')Object.assign(changes,{trial_cleanup_state:code?'pending':'verifying',trial_cleanup_next_at:new Date(Date.now()+(code?Math.min(1800000,60000*2**Math.min(project.trial_cleanup_attempts??0,5)):60000)).toISOString()});
+          if(isTimedPlan(project.plan))Object.assign(changes,{trial_cleanup_state:code?'pending':'verifying',trial_cleanup_next_at:new Date(Date.now()+(code?Math.min(1800000,60000*2**Math.min(project.trial_cleanup_attempts??0,5)):60000)).toISOString()});
           if (!code) await uploads.removeProject(project.id);
         }
-        else if(operation==='cleanup-status'&&project.plan==='free_trial'){
+        else if(operation==='cleanup-status'&&isTimedPlan(project.plan)){
           let report;try{report=JSON.parse(output.trim());}catch{}
           const complete=!code&&report?.environment===project.environment_name&&report?.cleanup_complete===true;
           Object.assign(changes,{trial_cleanup_state:complete?'complete':'verifying',trial_cleanup_next_at:complete?null:new Date(Date.now()+300000).toISOString()});
@@ -347,9 +347,10 @@ export async function createWorker(config, dependencies = {}) {
         return res.end(data);
       }
       if(route==='/api/profiles')return reply(200,{profiles:config.awsAccountId?config.awsProfiles??[]:[]});
-      if(route==='/api/trial')return reply(200,trials?await trials.account(user):{approved:true,trialUsed:false,durationMinutes:30});
+      if(route==='/api/trial')return reply(200,trials?await trials.account(user):{approved:true,trialUsed:false,durationMinutes:30,paidTestAvailable:false,paidTestDurationMinutes:120});
       if (route === '/api/deploy') {
         if (body.confirmCosts !== true) throw new HttpError(400, 'Confirm that AWS resources incur charges.');
+        if(body.testPaidPass===true&&!(config.paidTestEmails??[]).includes(user.email?.toLowerCase()))throw new HttpError(403,'The two-hour test pass is not enabled for this account.');
         if (running.size||zipReplacing) throw new HttpError(409, 'Another cloud operation is running.');
         if (launches >= 5) throw new HttpError(429, 'Worker launch limit reached. Ask the operator to review existing resources.');
         let zipItem;
@@ -371,7 +372,7 @@ export async function createWorker(config, dependencies = {}) {
         const id = randomUUID(); const application = `ebk-${id.replaceAll('-','').slice(0,16)}`;
         let project = { id, user_id: user.id, name: body.name, repository: repository.repository, region: body.region, port: body.port, mode: 'live', status: 'deploying', stage: 1, replicas: 1, revision: 1, variable_names: Object.keys(body.environment ?? {}), application_name: application, environment_name: `${application}-cluster` };
         let data;
-        if(trials){project=await trials.reserve(project,user);data=[project];}
+        if(trials){project=await trials.reserve(project,user,{paidTest:body.testPaidPass===true});data=[project];}
         else{const result=await admin.database.from('ebkit_web_projects').insert([project]).select('*');if(result.error)throw new HttpError(503,'Could not save deployment.');data=result.data;}
         try {
           if (zipItem) {
@@ -381,7 +382,7 @@ export async function createWorker(config, dependencies = {}) {
             await atomicJSON(path.join(directoryRoot,`${id}.source.json`),{ uploadId:body.uploadId, reviewHash:body.reviewHash });
           }
           await run('deploy', project, body); launches++;
-        } catch (error) { await save(id, { status: 'failed', last_error: error.message,...(project.plan==='free_trial'?{trial_cleanup_state:'pending',trial_cleanup_next_at:new Date().toISOString()}:{}) }); throw error; }
+        } catch (error) { await save(id, { status: 'failed', last_error: error.message,...(isTimedPlan(project.plan)?{trial_cleanup_state:'pending',trial_cleanup_next_at:new Date().toISOString()}:{}) }); throw error; }
         return reply(202, { project: data[0] });
       }
       const match = route.match(/^\/api\/projects\/([0-9a-f-]+)\/([a-z-]+)$/i);
@@ -390,13 +391,13 @@ export async function createWorker(config, dependencies = {}) {
       const operation=match[2];
       if(operation==='production'){
         const reads=['metrics','cost','leftovers','database-status','database-check','pipeline'];
-        const elevated=[...(config.testingEmails??[]),...(config.evaluatorEmails??[])].includes(user.email?.toLowerCase());
+        const elevated=[...(config.testingEmails??[]),...(config.evaluatorEmails??[]),...(project.plan==='paid_test'?(config.paidTestEmails??[]):[])].includes(user.email?.toLowerCase());
         if(!reads.includes(body.action)&&(!elevated||body.confirmation!==project.environment_name))throw new HttpError(403,'This production operation requires designated access and exact environment confirmation.');
         if(project.plan==='free_trial'&&!reads.includes(body.action))throw new HttpError(403,'Persistent databases, alarms, budgets and scaling policies require a deployment without a free-trial lifetime.');
       }
       if(body.profile&&(!(config.awsProfiles??[]).includes(body.profile)||!/^[-A-Za-z0-9_.]+$/.test(body.profile)||!/^\d{12}$/.test(config.awsAccountId??'')))throw new HttpError(403,'Choose a configured operator profile for this AWS account.');
-      if(project.plan==='free_trial'&&operation==='options'&&((body.options??[]).some(item=>item?.Namespace?.includes('autoscaling')&&item.Value!=='1')||(body.removeOptions??[]).some(item=>item.includes('autoscaling'))))throw new HttpError(403,'Free trials preserve one replica.');
-      const privileged=[...(config.testingEmails??[]),...(config.evaluatorEmails??[])].includes(user.email?.toLowerCase());
+      if(isTimedPlan(project.plan)&&operation==='options'&&((body.options??[]).some(item=>item?.Namespace?.includes('autoscaling')&&item.Value!=='1')||(body.removeOptions??[]).some(item=>item.includes('autoscaling'))))throw new HttpError(403,'Timed passes preserve one replica.');
+      const privileged=[...(config.testingEmails??[]),...(config.evaluatorEmails??[]),...(project.plan==='paid_test'?(config.paidTestEmails??[]):[])].includes(user.email?.toLowerCase());
       const mutations=['config-save','config-apply','clone','swap','version-delete'].includes(operation)||(operation==='options'&&(body.options||body.removeOptions?.length))||(operation==='config'&&(body.environment||body.unset?.length));
       if(mutations&&body.confirmation!==project.environment_name)throw new HttpError(400,'Confirm the exact source environment name before making this change.');
       if((['clone','swap','version-delete','config-save','config-apply'].includes(operation)||(operation==='options'&&(body.options||body.removeOptions?.length)))&&!privileged)throw new HttpError(403,'This operation requires an operator-designated testing or evaluator account.');
@@ -418,7 +419,7 @@ export async function createWorker(config, dependencies = {}) {
         if(!(config.evaluatorEmails??[]).includes(user.email?.toLowerCase())&&existing.length>=10)throw new HttpError(429,'Destroy an existing project before cloning.');
         const id=randomUUID();
         let clone={id,user_id:user.id,name:body.name,repository:project.repository,region:project.region,port:project.port,mode:'live',status:'deploying',stage:1,replicas:project.replicas,revision:1,variable_names:project.variable_names??[],application_name:project.application_name,environment_name:`ebk-${id.replaceAll('-','').slice(0,16)}-cluster`};
-        if(trials){clone=await trials.reserve(clone,user);if(clone.plan==='free_trial')clone.replicas=1;}
+        if(trials){clone=await trials.reserve(clone,user);if(isTimedPlan(clone.plan))clone.replicas=1;}
         else{const result=await admin.database.from('ebkit_web_projects').insert([clone]).select('*');if(result.error||!result.data?.[0])throw new HttpError(503,'Could not save clone.');clone=result.data[0];}
         const originalState=await readJSON(path.join(directoryRoot,`${project.id}.json`)).catch(()=>null);
         if(originalState)await atomicJSON(path.join(directoryRoot,`${id}.json`),{deployments:(originalState.deployments??[]).filter(item=>item.environment_name===project.environment_name)});

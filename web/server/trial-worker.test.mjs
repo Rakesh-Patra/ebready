@@ -15,14 +15,15 @@ async function fixture(){
   const q={select:()=>q,eq:(key,value)=>{filters.push([key,value,false]);return q;},neq:(key,value)=>{filters.push([key,value,true]);return q;},order:()=>q,limit:async()=>execute(),update:value=>{payload=value;return q;},insert:value=>{inserted=value;return q;},then:(resolve,reject)=>Promise.resolve(execute()).then(resolve,reject)};return q;
  },rpc:vi.fn(async(name,args)=>{
   if(name==='ebkit_reserve_trial'){
-   if(claims.some(row=>row.user_id===args.p_project.user_id))return {error:{message:'TRIAL_USED'}};
+   const paidTest=args.p_project.operator_paid_test===true;
+   if(!paidTest&&claims.some(row=>row.user_id===args.p_project.user_id))return {error:{message:'TRIAL_USED'}};
    if(rows.filter(row=>row.status!=='destroyed'||row.trial_cleanup_state!=='complete').length>=args.p_capacity)return {error:{message:'CAPACITY_FULL'}};
-   const project={...args.p_project,plan:'free_trial',trial_cleanup_state:'scheduled',trial_reserved_at:new Date(clock).toISOString(),trial_expires_at:new Date(clock+1800000).toISOString(),trial_cleanup_next_at:new Date(clock+1800000).toISOString()};rows.push(project);claims.push({user_id:project.user_id,project_id:project.id});return {data:project,error:null};
+   const project={...args.p_project,plan:paidTest?'paid_test':'free_trial',trial_cleanup_state:'scheduled',trial_reserved_at:new Date(clock).toISOString(),trial_expires_at:new Date(clock+1800000).toISOString(),trial_cleanup_next_at:new Date(clock+1800000).toISOString()};rows.push(project);if(!paidTest)claims.push({user_id:project.user_id,project_id:project.id});return {data:project,error:null};
   }
-  const row=rows.find(row=>row.id===args.p_id);if(!row.trial_started_at){row.trial_started_at=new Date(clock).toISOString();row.trial_expires_at=new Date(clock+1800000).toISOString();row.trial_cleanup_next_at=row.trial_expires_at;}return {data:{trial_started_at:row.trial_started_at,trial_expires_at:row.trial_expires_at,trial_cleanup_next_at:row.trial_cleanup_next_at},error:null};
+  const row=rows.find(row=>row.id===args.p_id);if(!row.trial_started_at){row.trial_started_at=new Date(clock).toISOString();row.trial_expires_at=new Date(clock+(row.plan==='paid_test'?7200000:1800000)).toISOString();row.trial_cleanup_next_at=row.trial_expires_at;}return {data:{trial_started_at:row.trial_started_at,trial_expires_at:row.trial_expires_at,trial_cleanup_next_at:row.trial_cleanup_next_at},error:null};
  })}};
  const launch=vi.fn(()=>{const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.stderr=new PassThrough();child.kill=vi.fn();children.push(child);return child;});
- async function serve(extra={}){const server=await createWorker({liveEnabled:true,python:'mock-python',jobRoot:root,allowedEmails:['owner@example.test'],origins:[],globalCapacity:2,...extra.config},{admin,spawn:launch,recover:false,now:()=>clock,trialInterval:20,authenticate:async()=>({id:'owner',email:'owner@example.test'}),fetch:async url=>new Response(JSON.stringify(url.includes('/contents/')?{type:'file',size:200}:{private:false,default_branch:'main'})),...extra.dependencies});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));servers.push(server);return {server,url:`http://127.0.0.1:${server.address().port}`};}
+ async function serve(extra={}){const server=await createWorker({liveEnabled:true,python:'mock-python',jobRoot:root,allowedEmails:['owner@example.test'],paidTestEmails:['owner@example.test'],origins:[],globalCapacity:2,...extra.config},{admin,spawn:launch,recover:false,now:()=>clock,trialInterval:20,authenticate:async()=>({id:'owner',email:'owner@example.test'}),fetch:async url=>new Response(JSON.stringify(url.includes('/contents/')?{type:'file',size:200}:{private:false,default_branch:'main'})),...extra.dependencies});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));servers.push(server);return {server,url:`http://127.0.0.1:${server.address().port}`};}
  const post=(url,route,body={})=>fetch(url+route,{method:'POST',headers:{Authorization:'Bearer test','Content-Type':'application/json'},body:JSON.stringify(body)});
  return {root,rows,claims,children,launch,admin,serve,post,advance:ms=>clock+=ms};
 }
@@ -40,6 +41,24 @@ it('reserves one trial, starts it at Green and allows updates within the origina
  expect((await f.post(url,'/api/deploy',request)).status).toBe(403);expect(f.launch).toHaveBeenCalledTimes(2);
  expect(await(await f.post(url,'/api/trial')).json()).toMatchObject({trialUsed:true,approved:true,durationMinutes:30});
  f.advance(1800001);expect((await f.post(url,`/api/projects/${project.id}/deploy`,{confirmCosts:true})).status).toBe(410);
+});
+it('starts the allowlisted test pass at Ready/Green for exactly two hours without consuming the free trial',async()=>{
+ const f=await fixture(),{url}=await f.serve();
+ expect(await(await f.post(url,'/api/trial')).json()).toMatchObject({paidTestAvailable:true,paidTestDurationMinutes:120});
+ const response=await f.post(url,'/api/deploy',{...request,testPaidPass:true});expect(response.status).toBe(202);
+ const project=(await response.json()).project;expect(project.plan).toBe('paid_test');expect(f.claims).toHaveLength(0);expect(f.launch.mock.calls[0][1]).toContain('--max-replicas');
+ const ready={deployments:[{status:'Ready',health:'Green',url:'https://owned.example.com'}]};
+ await writeFile(path.join(f.root,`${project.id}.json`),JSON.stringify(ready));f.children[0].emit('close',0);
+ await vi.waitFor(()=>expect(f.rows[0].status).toBe('ready'));
+ expect(Date.parse(f.rows[0].trial_expires_at)-Date.parse(f.rows[0].trial_started_at)).toBe(7200000);
+ expect((await f.post(url,`/api/projects/${project.id}/scale`,{replicas:2})).status).toBe(403);
+ f.advance(7200001);
+ expect((await f.post(url,`/api/projects/${project.id}/deploy`,{confirmCosts:true})).status).toBe(410);
+});
+it('rejects a forged test-pass request for an email that is not allowlisted',async()=>{
+ const f=await fixture(),{url}=await f.serve({config:{paidTestEmails:[]}});
+ expect((await f.post(url,'/api/deploy',{...request,testPaidPass:true})).status).toBe(403);
+ expect(f.admin.database.rpc).not.toHaveBeenCalled();expect(f.launch).not.toHaveBeenCalled();
 });
 it('resumes overdue destruction on startup and retains the slot until managed cleanup is verified',async()=>{
  const f=await fixture();f.rows.push({id:'22222222-2222-4222-8222-222222222222',user_id:'owner',mode:'live',name:'trial-app',repository:request.repository,region:'us-east-2',port:3000,application_name:'ebk-trial',environment_name:'ebk-trial-cluster',plan:'free_trial',status:'ready',trial_cleanup_state:'scheduled',trial_expires_at:new Date(Date.now()-1000).toISOString(),trial_cleanup_next_at:new Date(Date.now()-1000).toISOString()});

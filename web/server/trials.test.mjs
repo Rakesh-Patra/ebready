@@ -33,6 +33,24 @@ it('only trusts a configured authenticated testing identity',async()=>{
   f.rpc.mockResolvedValue({error:{message:'TEST_CAPACITY_FULL'}});
   await expect(f.manager.reserve({id:'one',user_id:'owner'},{id:'owner',email:'tester@example.test'})).rejects.toMatchObject({status:409});
 });
+it('reserves the separate two-hour pass only for its authenticated allowlisted email',async()=>{
+  const f=fixture({paidTestEmails:['paid@example.test'],allowedEmails:['paid@example.test']});
+  f.rpc.mockResolvedValue({data:{id:'paid-project',plan:'paid_test',trial_expires_at:new Date(time+1800000).toISOString()},error:null});
+  await f.manager.reserve({id:'paid-project',user_id:'owner'},{id:'owner',email:'paid@example.test'},{paidTest:true});
+  expect(f.rpc.mock.calls[0][1].p_project).toMatchObject({operator_paid_test:true});
+  expect(await f.manager.account({id:'owner',email:'paid@example.test'})).toMatchObject({paidTestAvailable:true,paidTestDurationMinutes:120});
+  await expect(f.manager.reserve({id:'paid-project',user_id:'owner'},{id:'other',email:'paid@example.test'},{paidTest:true})).rejects.toMatchObject({status:403});
+  await expect(f.manager.reserve({id:'paid-project',user_id:'owner'},{id:'owner',email:'ordinary@example.test'},{paidTest:true})).rejects.toMatchObject({status:403});
+  expect(f.rpc).toHaveBeenCalledOnce();
+});
+it('enforces one replica, one application and the timed deadline for the test pass',()=>{
+  const f=fixture(),project={...f.rows[0],plan:'paid_test',trial_expires_at:new Date(time+7200000).toISOString()};
+  expect(()=>f.manager.guard(project,'scale',{replicas:2})).toThrow('one replica');
+  expect(()=>f.manager.guard(project,'clone',{})).toThrow('one application');
+  f.manager.guard(project,'rollback',{});
+  f.advance(7200000);
+  expect(()=>f.manager.guard(project,'rollback',{})).toThrow('expired');
+});
 function fixture(overrides={}){
   let clock=time,busy=false;
   const rows=[{id:'one',plan:'free_trial',status:'ready',environment_name:'owned-cluster',trial_cleanup_state:'scheduled',trial_expires_at:new Date(time+1800000).toISOString(),trial_cleanup_next_at:new Date(time+1800000).toISOString(),trial_cleanup_attempts:0}];
@@ -45,8 +63,14 @@ function fixture(overrides={}){
 }
 it('reserves through the atomic database RPC using operator capacity',async()=>{const f=fixture();await f.manager.reserve({id:'one',user_id:'owner'});expect(f.rpc).toHaveBeenCalledWith('ebkit_reserve_trial',{p_project:{id:'one',user_id:'owner'},p_capacity:2});});
 it.each([['TRIAL_USED',403],['CAPACITY_FULL',429],['Offline',503]])('fails closed on %s before a launch',async(message,status)=>{const f=fixture();f.rpc.mockResolvedValue({error:{message}});await expect(f.manager.reserve({})).rejects.toMatchObject({status});expect(f.run).not.toHaveBeenCalled();});
-it('blocks expired updates and extra replicas but permits inspection and cleanup',()=>{const f=fixture(),project=f.rows[0];f.manager.guard(project,'deploy',{});expect(()=>f.manager.guard(project,'scale',{replicas:2})).toThrow('one replica');f.advance(1800000);for(const op of ['deploy','rollback','scale'])expect(()=>f.manager.guard(project,op,{replicas:1})).toThrow('expired');for(const op of ['status','logs','destroy','cleanup-status'])expect(()=>f.manager.guard(project,op,{})).not.toThrow();});
+it('blocks expired updates and extra replicas but permits inspection and cleanup',()=>{const f=fixture(),project=f.rows[0];f.manager.guard(project,'deploy',{});expect(()=>f.manager.guard(project,'scale',{replicas:2})).toThrow('one replica');f.advance(1800000);for(const op of ['deploy','rollback','scale'])expect(()=>f.manager.guard(project,op,{replicas:1})).toThrow('expired');expect(()=>f.manager.guard(project,'production',{action:'budget'})).toThrow('expired');f.manager.guard(project,'production',{action:'metrics'});for(const op of ['status','logs','destroy','cleanup-status'])expect(()=>f.manager.guard(project,op,{})).not.toThrow();});
 it('waits until expiry then durably schedules exactly one owned destruction',async()=>{const f=fixture();await f.manager.tick();expect(f.run).not.toHaveBeenCalled();f.advance(1800000);await Promise.all([f.manager.tick(),f.manager.tick()]);expect(f.run).toHaveBeenCalledOnce();expect(f.run.mock.calls[0]).toMatchObject(['destroy',{id:'one'},{confirmation:'owned-cluster'}]);expect(f.rows[0].trial_cleanup_state).toBe('destroying');expect(f.rows[0].trial_cleanup_attempts).toBe(1);});
+it('cleans up a two-hour test pass when its persisted deadline is reached',async()=>{
+  const f=fixture();Object.assign(f.rows[0],{plan:'paid_test',trial_expires_at:new Date(time+7200000).toISOString(),trial_cleanup_next_at:new Date(time+7200000).toISOString()});
+  await f.manager.tick();expect(f.run).not.toHaveBeenCalled();
+  f.advance(7200000);await f.manager.tick();
+  expect(f.run).toHaveBeenCalledWith('destroy',expect.objectContaining({plan:'paid_test'}),{confirmation:'owned-cluster'});
+});
 it('reconstructs overdue work from persistent records after a restart',async()=>{const f=fixture();f.advance(1800001);const restarted=createTrials(f.options);await restarted.tick();expect(f.run).toHaveBeenCalledWith('destroy',expect.objectContaining({id:'one'}),{confirmation:'owned-cluster'});});
 it('backs off failed cleanup launches and retries after restart',async()=>{const f=fixture();f.advance(1800000);f.run.mockRejectedValueOnce(new Error('spawn failed'));await f.manager.tick();expect(f.rows[0].trial_cleanup_state).toBe('pending');await createTrials(f.options).tick();expect(f.run).toHaveBeenCalledTimes(1);f.advance(60000);await createTrials(f.options).tick();expect(f.run).toHaveBeenCalledTimes(2);expect(f.rows[0].trial_cleanup_attempts).toBe(2);});
 it('verifies managed cleanup instead of repeatedly destroying a terminated environment',async()=>{const f=fixture();Object.assign(f.rows[0],{status:'destroyed',trial_cleanup_state:'verifying',trial_cleanup_next_at:new Date(time-1).toISOString()});await f.manager.tick();expect(f.run.mock.calls[0][0]).toBe('cleanup-status');});

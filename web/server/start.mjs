@@ -18,6 +18,7 @@ const config = {
   allowedEmails: (process.env.EBKIT_ALLOWED_EMAILS || '').toLowerCase().split(',').map(value => value.trim()).filter(Boolean),
   testingEmails: (process.env.EBKIT_TESTING_EMAILS || '').toLowerCase().split(',').map(value => value.trim()).filter(Boolean),
   evaluatorEmails: (process.env.EBKIT_EVALUATOR_EMAILS || '').toLowerCase().split(',').map(value => value.trim()).filter(Boolean),
+  paidTestEmails: (process.env.EBKIT_PAID_TEST_EMAILS || '').toLowerCase().split(',').map(value => value.trim()).filter(Boolean),
   origins: (process.env.EBKIT_WEB_ORIGINS || 'http://127.0.0.1:5173,http://localhost:5173').split(','),
   ...(process.env.EBKIT_JOBS_DIR ? { jobRoot: path.resolve(process.env.EBKIT_JOBS_DIR) } : {}),
   geminiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,

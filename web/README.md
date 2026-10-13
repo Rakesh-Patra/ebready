@@ -37,6 +37,7 @@ INSFORGE_API_KEY=
 EBKIT_PYTHON=
 EBKIT_LIVE_ENABLED=false
 EBKIT_ALLOWED_EMAILS=
+EBKIT_PAID_TEST_EMAILS=
 EBKIT_WEB_ORIGINS=http://127.0.0.1:5173,http://localhost:5173
 GEMINI_API_KEY=
 EBKIT_GEMINI_MODEL=gemini-2.5-flash
@@ -132,7 +133,7 @@ The pilot worker runs one operation at a time. Each user can have three active l
 
 ### Interrupted-job recovery
 
-Cloud commands run in a detached runner that writes atomic job records and redacted logs to the private `server/.jobs` directory. Restarting the HTTP backend reconnects to the existing runner without starting another build, deployment, rollback or destroy command. The original two-hour operation timeout remains in effect across backend restarts; this is a command timeout, not the planned trial expiry feature.
+Cloud commands run in a detached runner that writes atomic job records and redacted logs to the private `server/.jobs` directory. Restarting the HTTP backend reconnects to the existing runner without starting another build, deployment, rollback or destroy command. The original two-hour operation timeout remains in effect across backend restarts; it is separate from the 30-minute free-trial and two-hour test-pass deadlines.
 
 If a job completes while the backend is offline, its result is applied when the backend returns. Failed database updates are retried from the saved completion record, and revision updates are idempotent. A second backend cannot use the same directory concurrently.
 
@@ -182,13 +183,15 @@ Repository validation reads public example environment templates and up to 40 sm
 
 Detection is heuristic. Blank template settings and common database/cache connection references are treated as required; optional template comments and defaults are respected. Where runtime references are available, unused template entries (such as Compose-only settings) are omitted. Review repository documentation for dynamic settings or dependencies the scan cannot identify. This check does not provision or test the database connection. Existing deployments retain settings during manual redeploy.
 
-### Approved 30-minute trials
+### Approved trials and two-hour test passes
 
-The email allowlist remains operator approval. Every new website deployment reserves a single lifetime trial per InsForge user, enforced by an admin-only atomic database function. Failed/abandoned launches also consume the reservation; deleting a deployment does not reset it. Different accounts require separate operator approval. Payments are not implemented: the UI advertises a **Rs49 two-hour pass, Coming soon**, with other tiers later.
+The email allowlist remains operator approval. Every free website deployment reserves a single lifetime trial per InsForge user, enforced by an admin-only atomic database function. Failed/abandoned launches also consume the reservation; deleting a deployment does not reset it. `EBKIT_PAID_TEST_EMAILS` separately enables the no-payment, two-hour pass for selected accounts; those emails must also be listed in `EBKIT_ALLOWED_EMAILS`. This test pass is separate from a user's free-trial claim, permits one active live deployment per account, and may be used again after verified cleanup. Do not add general users to this operator-only test allowlist. For enabled testers, Pricing still shows the planned **₹49** price, but the test pass makes no payment request or charge. Paid checkout is not implemented.
 
-The trial countdown starts once AWS reaches Ready/Green, lasts 30 minutes, and never resets on redeploy/rollback. Provisioning has its own 30-minute deadline; failed provisioning queues cleanup immediately. Free trials allow one replica. `EBKIT_GLOBAL_CAPACITY=2` defaults to two global deployment slots, including provisioning and trial resources awaiting verified cleanup; supported values are 1-10. The quota is serialized in PostgreSQL across concurrent requests. Existing legacy projects count while active and are not assigned retroactive deadlines.
+The migration `migrations/20261014120000_ebkit-paid-test-pass.sql` must be applied to the linked InsForge database before deploying the updated worker. Review pending migrations, then apply this migration with `npx -y @insforge/cli db migrations up 20261014120000_ebkit-paid-test-pass.sql`. Add only the intended tester email to `EBKIT_PAID_TEST_EMAILS`, ensure it is also approved in `EBKIT_ALLOWED_EMAILS`, and restart the backend.
 
-The worker polls persistent database deadlines every 30 seconds, resumes overdue cleanup on startup, runs the owned `ebkit destroy`, retries failures with backoff, and verifies managed deletion using `ebkit cleanup-status --json`. Termination alone does not release a trial slot; the recorded eligible artifact cleanup and managed cluster stack deletion must both be verified. Missing state or IAM failures remain pending for operator review. Trial updates and scale-up are rejected server-side after expiry; reading status/logs and cleanup remain available.
+The free-trial countdown starts once AWS reaches Ready/Green, lasts 30 minutes, and never resets on redeploy/rollback. The test-pass countdown starts at Ready/Green and lasts 120 minutes; it also cannot be extended by updates. Both passes allow one replica and receive a 30-minute provisioning deadline; failed provisioning queues cleanup immediately. `EBKIT_GLOBAL_CAPACITY=2` defaults to two global deployment slots, including provisioning and timed-pass resources awaiting verified cleanup; supported values are 1-10. The quota is serialized in PostgreSQL across concurrent requests. Existing legacy projects count while active and are not assigned retroactive deadlines.
+
+The worker polls persistent database deadlines every 30 seconds, resumes overdue cleanup on startup, runs the owned `ebkit destroy`, retries failures with backoff, and verifies managed deletion using `ebkit cleanup-status --json`. Termination alone does not release a timed-pass slot; the recorded eligible artifact cleanup and managed cluster stack deletion must both be verified. Missing state or IAM failures remain pending for operator review. Trial updates and scale-up are rejected server-side after expiry; reading status/logs and cleanup remain available.
 
 Keep the backend running as a supervised service and retain `EBKIT_JOBS_DIR` on persistent disk. Deadlines and reservations survive restarts; cleanup cannot execute while the host/worker is offline and catches up when it returns. Elastic Beanstalk's managed EKS deletion can outlast the trial, so a countdown is not a guarantee that AWS charges stop at expiry. This policy applies to hosted website deployments; CLI deployments into a user's own AWS account do not automatically get a trial timer.
 

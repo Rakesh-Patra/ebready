@@ -262,11 +262,26 @@ it('prepares a missing GitHub Dockerfile through the shared snapshot upload flow
   expect(screen.getByRole('button',{name:'Continue with reviewed ZIP'})).toBeTruthy();
 });
 
-it('shows the 30-minute approved trial and the Rs49 coming-soon pass without checkout',async()=>{
+it('shows the 30-minute approved trial and keeps the paid pass unavailable to regular visitors',async()=>{
  render(<App/>);await userEvent.click(screen.getByRole('link',{name:'Pricing'}));
  expect(screen.getByText('30 minutes from Ready / Green.')).toBeTruthy();expect(screen.getByText(String.fromCharCode(8377)+'49')).toBeTruthy();
  expect((screen.getByRole('button',{name:'Coming soon'}) as HTMLButtonElement).disabled).toBe(true);
  expect(api.backend).not.toHaveBeenCalled();
+});
+
+it('lets only a configured account launch the no-payment two-hour pass',async()=>{
+ api.auth.getCurrentUser.mockResolvedValue({data:{user:{id:'owner',email:'owner@example.test'}},error:null});
+ api.getTrialAccount.mockResolvedValue({approved:true,trialUsed:true,durationMinutes:30,paidTestAvailable:true,paidTestDurationMinutes:120});
+ api.database.from.mockReturnValue({select:()=>({order:()=>({limit:async()=>({data:[],error:null})})})});
+ const user=userEvent.setup();render(<App/>);await screen.findByText('Signed in');await user.click(screen.getByRole('button',{name:'Pricing'}));
+ await user.click(screen.getByRole('button',{name:'Start 2-hour test pass'}));
+ await user.type(screen.getByLabelText('GitHub repository URL'),'https://github.com/owner/paid-test');
+ await user.click(screen.getByRole('checkbox',{name:'My repository has a root Dockerfile.'}));
+ await user.click(screen.getByRole('button',{name:/Check repository & continue/}));
+ expect(screen.getByText(/Two-hour test pass from Ready\/Green/)).toBeTruthy();
+ await user.click(screen.getByRole('checkbox',{name:/I understand this creates billable AWS resources/}));
+ await user.click(within(screen.getByRole('dialog',{name:'Make it your own.'})).getByRole('button',{name:'Start 2-hour test pass'}));
+ await waitFor(()=>expect(api.backend).toHaveBeenLastCalledWith('/api/deploy',expect.objectContaining({testPaidPass:true,confirmCosts:true})));
 });
 
 it('provides a header sign-out control for the mobile layout',async()=>{
