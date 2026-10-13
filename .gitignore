@@ -15,28 +15,26 @@ htmlcov/
 .idea/
 .vscode/
 
-# AWS / EB artifacts
-.elasticbeanstalk/
-*.zip
+fastapi-example/
+notes-app/
 
-# InsForge & AI agent skills
-.insforge
-.agent
-.agents
-.augment
-.claude
-.cline
-.github/copilot*
-.kilocode
-.qoder
-.qwen
-.roo
-.trae
-.windsurf
-
-# Local test workspaces
+# Private development state and generated verification data
+.aws/
+.codex/
+.insforge/
+.agents/
+.augment/
+.claude/
+.qoder/
+.qwen/
+.roo/
+.trae/
+.windsurf/
 .pytest-*/
-
-# One-off local verification artifacts
-/docs/lifecycle-verification-*.md
-/web/scripts/verify-backend.mjs
+artifacts/
+build/
+web/node_modules/
+web/dist/
+web/.test-tmp*/
+web/server/.jobs/
+*.tsbuildinfo

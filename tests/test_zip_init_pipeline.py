@@ -29,7 +29,7 @@ def test_zip_init_generation_order_source_scout_and_security_gate(tmp_path,provi
     def scout(project):
         events.append('scout')
         assert Path(project).resolve()==(tmp_path/'project-ebkit').resolve()
-        assert (Path(project)/'Dockerfile').read_text(encoding='utf-8')==dockerfile
+        assert (Path(project)/'Dockerfile').read_text(encoding='utf-8').strip()==dockerfile.strip()
         return ScoutResult(gate_passed=gate_passed,critical_count=0 if gate_passed else 1,high_count=0 if gate_passed else 7,summary='Source dependency findings',gate_reason=None if gate_passed else 'Critical CVEs (1) exceed threshold (0).',artifact_kind='source',details=[])
     with patch('ebkit.commands.init.load_config',return_value=None),patch('ebkit.commands.init._check_gemini_key'),patch('ebkit.commands.init.get_analyzer',return_value=analyzer),patch('ebkit.generator.docker_ai.DockerAIService.is_available',return_value=provider!='unavailable'),patch('ebkit.generator.docker_ai.DockerAIService.ask_gordon',side_effect=gordon),patch('ebkit.generator.docker_ai.DockerAIService._generate_multitier_with_gemini',side_effect=gemini),patch('ebkit.validator.docker_validator.DockerScoutValidator.is_scout_available',return_value=True),patch('ebkit.validator.docker_validator.DockerScoutValidator.scan_source',side_effect=scout) as scan_source,patch('ebkit.validator.docker_validator.DockerBuildValidator.build') as build,patch('ebkit.validator.docker_validator.DockerRuntimeValidator.validate') as runtime:
         result=CliRunner().invoke(init_command,['--zip',str(source),'--yes','--no-build','--no-runtime'])

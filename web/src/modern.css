@@ -198,3 +198,38 @@ footer{font-size:11px;color:var(--copy)}
  .page-heading>.button{width:100%}
  .detail-buttons .button{white-space:normal}
 }
+
+/* Navigation contains links only; appearance and account actions sit in the page. */
+.account-controls{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--line)}
+.account-controls>div{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}.account-controls .button{min-height:40px;font-size:12px}
+.landing-main>.account-controls{margin:20px 0 0}
+.sidebar{position:fixed;inset:0 auto 0 0;height:100dvh;display:flex;flex-direction:column;justify-content:flex-start;overflow-y:auto}
+.sidebar-brand-row{flex-shrink:0}.sidebar-brand-row>.mobile-menu,.landing-nav>.mobile-menu{display:none;position:relative;top:auto;right:auto}
+.mobile-menu-panel{display:block}
+@media(max-width:760px){
+ .sidebar{position:sticky;inset:auto;top:0;height:auto;overflow:visible;display:block;padding:14px 16px}
+ .sidebar-brand-row>.mobile-menu,.landing-nav>.mobile-menu{display:block}
+ .sidebar>nav{display:none}
+ .account-controls{gap:8px;margin-bottom:18px;padding-bottom:14px;flex-wrap:wrap}
+ .account-controls .button{min-height:44px;padding:10px 12px}
+ .account-controls .account-theme{min-width:44px;padding:10px}
+ .account-theme span{display:none}.account-controls>div{gap:8px;margin-left:auto}
+ .landing-main>.account-controls{margin-top:16px}.landing-hero{padding-top:30px}
+ .mobile-menu-panel{display:block!important;margin:0!important;padding:10px!important}
+}
+
+.topbar .connected{margin-left:auto}
+
+.zip-security{display:flex;gap:12px;align-items:flex-start;padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--subtle);margin-bottom:18px}.zip-security>svg{flex-shrink:0;margin-top:2px}.zip-security strong{font-size:14px}.zip-security p{font-size:12px;color:var(--copy);line-height:1.7;margin:7px 0 0}.security-counts{display:block;font-size:12px;margin-top:10px;font-variant-numeric:tabular-nums;color:var(--ink)}.review-section{border-bottom:1px solid var(--line);margin-bottom:14px;padding-bottom:12px}.review-section>summary{cursor:pointer;min-height:44px;align-content:center;font-size:13px;font-weight:500}.review-section>summary>span{font-size:11px;color:var(--copy);margin-left:12px}.review-section .section-heading{margin-top:14px}.review-section .checkbox{margin:16px 0 0}.advanced-review>summary{color:var(--copy);font-size:12px}.review-footnote{margin:16px 0 0}
+
+.modal label.zip-upload{display:flex;flex-direction:column;align-items:stretch;gap:12px;padding:22px;font-weight:400;text-align:left}.zip-upload>svg{color:var(--orange)}.zip-upload strong{font-size:14px;font-weight:600}.zip-upload span{line-height:1.7;color:var(--copy);font-weight:400}.zip-upload input{font-size:12px;color:var(--copy);width:100%;padding:0}.zip-upload input::file-selector-button{border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);padding:10px 12px;margin-right:12px;cursor:pointer;min-height:44px}.review-continue{width:100%;margin-bottom:16px}
+
+.advanced-review>summary small{float:right;font-size:11px;font-weight:400;color:var(--copy);padding-left:12px}
+.doctor-panel{margin:20px 0;padding:18px;border:1px solid var(--line);border-radius:12px;background:var(--subtle)}
+.doctor-panel .section-heading{display:flex;flex-wrap:wrap;align-items:center;gap:12px;justify-content:space-between}
+.doctor-panel .section-heading strong{display:flex;align-items:center;gap:8px}
+.doctor-panel pre{overflow:auto;max-height:320px;padding:12px;border-radius:8px;background:var(--surface);font-size:12px;white-space:pre}
+.doctor-findings{padding-left:20px;font-size:13px}.doctor-findings li{margin:14px 0}.doctor-findings p{margin:6px 0;line-height:1.6}.doctor-findings span{color:var(--copy);font-size:12px}
+.doctor-verification{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}.doctor-verification span{font-size:11px;padding:6px 9px;border:1px solid var(--line);border-radius:6px}
+
+.cloud-controls{margin-top:24px;border-top:1px solid var(--border);padding-top:16px}.cloud-controls details{margin:16px 0}.cloud-controls summary{cursor:pointer;margin-bottom:12px;font-weight:600}.control-output{white-space:pre-wrap;overflow-wrap:anywhere;max-height:300px;overflow:auto;padding:12px;background:rgba(127,127,127,.08);border-radius:8px}

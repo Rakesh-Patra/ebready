@@ -1,6 +1,38 @@
 import {expect,it,vi} from 'vitest';
 import {createTrials} from './trials.mjs';
 const time=Date.parse('2026-10-12T12:00:00Z');
+it('reserves manual-lifetime evaluator access only for the configured authenticated user',async()=>{
+  const f=fixture({evaluatorEmails:['evaluator@example.test']});
+  f.rpc.mockResolvedValue({data:{id:'one',plan:null,trial_expires_at:null},error:null});
+  await f.manager.reserve({id:'one',user_id:'owner'},{id:'owner',email:'evaluator@example.test'});
+  expect(f.rpc.mock.calls[0][1].p_project).toMatchObject({operator_test:true,operator_evaluator:true});
+  expect(await f.manager.account({id:'owner',email:'evaluator@example.test'})).toMatchObject({trialUsed:false,durationMinutes:null,testing:true});
+  f.manager.guard({id:'one',user_id:'owner',plan:null},'rollback',{}, {id:'owner',email:'evaluator@example.test'},true);
+  await expect(f.manager.reserve({id:'one',user_id:'other',operator_evaluator:true},{id:'other',email:'free@example.test'})).rejects.toMatchObject({status:503});
+  expect(f.rpc.mock.calls[1][1].p_project).not.toHaveProperty('operator_evaluator');
+});
+it('blocks ordinary free updates even before expiry and allows only the authenticated tester',()=>{
+  const f=fixture({testingEmails:['tester@example.test']}), project={...f.rows[0],user_id:'owner'};
+  for(const op of ['rollback']){
+    expect(()=>f.manager.guard(project,op,{}, {id:'owner',email:'free@example.test'},true)).toThrow('Rollback');
+    expect(()=>f.manager.guard(project,op,{}, {id:'other',email:'tester@example.test'},true)).toThrow('Rollback');
+    expect(()=>f.manager.guard(project,op,{}, {id:'owner',email:'tester@example.test'},true)).not.toThrow();
+  }
+  f.manager.guard(project,'deploy',{});
+  f.manager.guard(project,'destroy',{}, {id:'owner',email:'free@example.test'},true);
+});
+it('only trusts a configured authenticated testing identity',async()=>{
+  const f=fixture({testingEmails:['tester@example.test']});
+  await f.manager.reserve({id:'one',user_id:'owner',operator_test:true},{id:'owner',email:'ordinary@example.test'});
+  expect(f.rpc.mock.calls[0][1].p_project).not.toHaveProperty('operator_test');
+  await f.manager.reserve({id:'one',user_id:'owner'},{id:'owner',email:'tester@example.test'});
+  expect(f.rpc.mock.calls[1][1].p_project.operator_test).toBe(true);
+  await f.manager.reserve({id:'one',user_id:'owner'},{id:'other',email:'tester@example.test'});
+  expect(f.rpc.mock.calls[2][1].p_project).not.toHaveProperty('operator_test');
+  expect((await f.manager.account({id:'owner',email:'tester@example.test'})).trialUsed).toBe(false);
+  f.rpc.mockResolvedValue({error:{message:'TEST_CAPACITY_FULL'}});
+  await expect(f.manager.reserve({id:'one',user_id:'owner'},{id:'owner',email:'tester@example.test'})).rejects.toMatchObject({status:409});
+});
 function fixture(overrides={}){
   let clock=time,busy=false;
   const rows=[{id:'one',plan:'free_trial',status:'ready',environment_name:'owned-cluster',trial_cleanup_state:'scheduled',trial_expires_at:new Date(time+1800000).toISOString(),trial_cleanup_next_at:new Date(time+1800000).toISOString(),trial_cleanup_attempts:0}];

@@ -56,7 +56,7 @@ describe('deployment dashboard', () => {
   });
   it('keeps guests in demo mode and opens login instead of enabling AWS',async()=>{
     render(<App/>);const user=userEvent.setup();await user.click(await screen.findByRole('button',{name:'Explore demo'}));
-    await user.click(screen.getByRole('button',{name:/Log in for AWS/}));
+    await user.click(screen.getByRole('button',{name:'Log in'}));
     expect(screen.getByRole('dialog',{name:'Welcome back.'})).toBeTruthy();
     expect(screen.queryByRole('button',{name:/LIVE AWS/})).toBeNull();expect(api.backend).not.toHaveBeenCalled();
   });
@@ -148,13 +148,19 @@ describe('deployment dashboard', () => {
     await act(async () => listener('signedOut'));
     expect(await screen.findByRole('button', { name: 'Log in' })).toBeTruthy();
   });
-  async function failedProject(status = 'failed', repository = 'https://github.com/a/b') {
+  async function failedProject(status = 'failed', repository = 'https://github.com/a/b', testing = true) {
+    api.getTrialAccount.mockResolvedValue({approved:true,trialUsed:!testing,durationMinutes:30,testing});
     api.auth.getCurrentUser.mockResolvedValue({ data: { user: { id: 'owner' } }, error: null });
     const project = { id: '11111111-1111-4111-8111-111111111111', user_id: 'owner', name: 'failed-app', repository, region: 'us-east-2', port: 8080, mode: 'live', operation_log: 'Build succeeded\nERROR: health check failed', status, stage: 2, replicas: 1, revision: 1, variable_names: [], created_at: new Date().toISOString(), operation_running: false };
     api.database.from.mockReturnValue({ select: () => ({ order: () => ({ limit: () => Promise.resolve({ data: [project], error: null }) }) }) });
     render(<App/>); await userEvent.click(await screen.findByRole('button', { name: /failed-app/ })); return project;
   }
-  it('allows retrying a failed live deployment', async () => {
+  it('allows redeploy and hides rollback for an ordinary free user', async () => {
+    await failedProject('ready','https://github.com/a/b',false);
+    expect(screen.getByRole('button',{name:'Redeploy in AWS'})).toBeTruthy();
+    expect(screen.queryByRole('button',{name:'Rollback in AWS'})).toBeNull();
+  });
+  it('allows the designated tester to retry a failed live deployment', async () => {
     const project = await failedProject();
     expect((screen.getByRole('button', { name: 'Redeploy in AWS' }) as HTMLButtonElement).disabled).toBe(false);
     await userEvent.click(screen.getByRole('button', { name: 'Redeploy in AWS' }));
@@ -169,7 +175,7 @@ describe('deployment dashboard', () => {
     await user.click(screen.getByRole('button',{name:'Detect project settings'}));
     await user.click(screen.getByRole('checkbox',{name:'I checked the container port.'}));await user.click(screen.getByRole('checkbox',{name:/Allow AI/}));
     await user.click(screen.getByRole('button',{name:'Prepare & review Dockerfile'}));
-    await screen.findByText('Existing root Dockerfile');await user.click(screen.getByRole('checkbox',{name:'I reviewed this root Dockerfile.'}));
+    await screen.findByText('Existing root Dockerfile');await user.click(screen.getByRole('button',{name:'Review Dockerfile to continue'}));await user.click(screen.getByRole('checkbox',{name:'I reviewed this root Dockerfile.'}));
     await user.click(screen.getByRole('button',{name:'Continue with reviewed ZIP'}));
     expect((screen.getByLabelText('Project name') as HTMLInputElement).value).toBe(project.name);
     await user.click(screen.getByRole('checkbox'));await user.click(screen.getByRole('button',{name:'Redeploy to AWS'}));
@@ -197,7 +203,7 @@ describe('deployment dashboard', () => {
     await failedProject(); await userEvent.click(screen.getByRole('button', { name: 'Rollback in AWS' }));
     expect(screen.getByLabelText('Rollback version label')).toBeTruthy();
     expect(screen.getByRole('status').textContent).toMatch(/previously created version/);
-    expect(api.backend).not.toHaveBeenCalled();
+    expect(api.backend.mock.calls.every(call=>call[0]==='/api/profiles')).toBe(true);
   });
 });
 
@@ -218,6 +224,7 @@ it('ZIP wizard requires Dockerfile review and environment values before enabling
   await user.click(screen.getByRole('button',{name:'Prepare & review Dockerfile'}));
   await screen.findByText('AI Dockerfile draft');
   expect(screen.queryByRole('button',{name:'Continue with reviewed ZIP'})).toBeNull();
+  await user.click(screen.getByRole('button',{name:'Review Dockerfile to continue'}));
   await user.click(screen.getByRole('checkbox',{name:'I reviewed this root Dockerfile.'}));
   await user.click(screen.getByRole('button',{name:'Continue with reviewed ZIP'}));
   expect((screen.getByLabelText('Container port') as HTMLInputElement).value).toBe('3000');
@@ -228,6 +235,31 @@ it('ZIP wizard requires Dockerfile review and environment values before enabling
   await user.type(screen.getByRole('textbox',{name:/Application environment/}),'DATABASE_URL=postgresql://database.example/app');
   expect(screen.getByRole('button',{name:'Deploy to AWS'})).toBeTruthy();
   expect(api.backend).toHaveBeenCalledWith('/api/uploads/zip-one/prepare',{port:3000,allowAI:true});
+});
+
+it('prepares a missing GitHub Dockerfile through the shared snapshot upload flow',async()=>{
+  const user=userEvent.setup();
+  api.auth.getCurrentUser.mockResolvedValue({data:{user:{id:'owner',email:'owner@example.test'}},error:null});
+  api.database.from.mockReturnValue({select:()=>({order:()=>({limit:async()=>({data:[],error:null})})})});
+  api.backend.mockImplementation(async(route:string)=>{
+    if(route==='/api/repository/import')return {uploadId:'github-snapshot',port:3000,repository:'https://github.com/owner/project',commit:'abcdef1234567890',name:'project.zip'};
+    if(route.endsWith('/prepare'))return {uploadId:'github-snapshot',name:'project.zip',dockerfile:'FROM node:22\nCMD ["node","app.js"]',reviewHash:'review-one',generated:true,generator:'gordon',port:3000,environment:[],environmentScanComplete:true,scout:{gate_passed:true,summary:'Source dependency gate passed',details:[]}};
+    return {};
+  });
+  render(<App/>);await screen.findByText('Signed in');
+  await user.click(screen.getByRole('button',{name:/New deployment/}));
+  await user.type(screen.getByLabelText('GitHub repository URL'),'https://github.com/owner/project');
+  await user.click(screen.getByRole('button',{name:'Prepare Dockerfile from GitHub snapshot'}));
+  await screen.findByText('abcdef123456');
+  await user.click(screen.getByRole('checkbox',{name:'I checked the container port.'}));
+  await user.click(screen.getByRole('checkbox',{name:/Allow AI analysis to generate a production root Dockerfile/}));
+  await user.click(screen.getByRole('button',{name:'Prepare & review Dockerfile'}));
+  await screen.findByText('Docker AI (Gordon) draft');
+  expect(api.backend).toHaveBeenCalledWith('/api/uploads/github-snapshot/prepare',{port:3000,allowAI:true});
+  await user.click(screen.getByRole('button',{name:'Review Dockerfile to continue'}));
+  await user.click(screen.getByRole('checkbox',{name:'I reviewed this root Dockerfile.'}));
+  await user.click(screen.getByRole('button',{name:'Use reviewed GitHub snapshot for deployment'}));
+  expect(screen.getByRole('button',{name:'Continue with reviewed ZIP'})).toBeTruthy();
 });
 
 it('shows the 30-minute approved trial and the Rs49 coming-soon pass without checkout',async()=>{
@@ -242,7 +274,7 @@ it('provides a header sign-out control for the mobile layout',async()=>{
  api.auth.signOut.mockResolvedValue({error:null});
  api.database.from.mockReturnValue({select:()=>({order:()=>({limit:async()=>({data:[],error:null})})})});
  render(<App/>);await screen.findByText('Signed in');
- await userEvent.click(screen.getByRole('button',{name:'Sign out of account'}));
+ await userEvent.click(screen.getByRole('button',{name:'Sign out'}));
  expect(api.auth.signOut).toHaveBeenCalledOnce();expect(await screen.findByRole('button',{name:'Log in'})).toBeTruthy();
 });
 
@@ -256,6 +288,19 @@ it('opens a public landing page without workspace statistics for signed-out visi
 });
 it('enters guest simulation only after choosing Explore demo',async()=>{
  render(<App/>);await userEvent.click(await screen.findByRole('button',{name:'Explore demo'}));
- expect(screen.getByRole('button',{name:/Log in for AWS/})).toBeTruthy();expect(screen.getByText('Total projects')).toBeTruthy();
+ expect(screen.getByText('Demo only')).toBeTruthy();expect(screen.getByText('Total projects')).toBeTruthy();
  expect(api.backend).not.toHaveBeenCalled();expect(api.database.from).not.toHaveBeenCalled();
+});
+
+it('quotes a pasted database URL immediately and preserves all query parameters',async()=>{
+ api.auth.getCurrentUser.mockResolvedValue({data:{user:{id:'owner',email:'owner@example.test'}},error:null});
+ api.database.from.mockReturnValue({select:()=>({order:()=>({limit:async()=>({data:[],error:null})})})});
+ api.backend.mockResolvedValue({environment:[{name:'POSTGRES_URL',required:true,source:'.env.example'}],environmentScanComplete:true});
+ const user=userEvent.setup();render(<App/>);await screen.findByText('Signed in');
+ await user.click(screen.getByRole('button',{name:/New deployment/}));await user.type(screen.getByLabelText('GitHub repository URL'),'https://github.com/owner/project');
+ await user.click(screen.getByRole('checkbox'));await user.click(screen.getByRole('button',{name:/Check repository/}));
+ const input=screen.getByRole('textbox',{name:/Application environment/}) as HTMLTextAreaElement;
+ await user.click(input);input.setSelectionRange(input.value.length,input.value.length);
+ const url='postgresql://db.example.test/neondb?sslmode=require&channel_binding=require';await user.paste(url);
+ expect(input.value).toBe('POSTGRES_URL="'+url+'"');
 });

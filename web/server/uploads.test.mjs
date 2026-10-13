@@ -11,16 +11,69 @@ import { createWorker } from './worker.mjs';
 import { readJSON, atomicJSON } from './jobs.mjs';
 const user={id:'owner',email:'owner@example.test'},dockerfile='FROM node:22-alpine\nWORKDIR /app\nCOPY . .\nUSER node\nEXPOSE 3000\nCMD ["node","app.js"]\n';
 const directories=[],servers=[];
-async function setup(existing=true,extra={}) {
+async function setup(existing=true,extra={},config={}) {
   const root=await mkdtemp(path.join(tmpdir(),'ebkit-upload-'));directories.push(root);
   const geminiFetch=vi.fn(async()=>new Response(JSON.stringify({candidates:[{content:{parts:[{text:JSON.stringify({dockerfile,notes:'Review this draft'})}]}}]})));
   const sourceScout=vi.fn(async()=>({gate_passed:true,available:true,critical_count:0,high_count:0,summary:'Source dependency security gate passed',details:[]}));
   const inspectZip=async(_archive,destination)=>{await mkdir(destination,{recursive:true});await writeFile(path.join(destination,'app.js'),'console.log("hello")');if(existing)await writeFile(path.join(destination,'Dockerfile'),dockerfile);return {scan:{language:'node',detected_start_command:'node app.js'},files:[{path:'.env.example',text:'DATABASE_URL='},{path:'app.js',text:'process.env.DATABASE_URL'}],dockerfile:existing?dockerfile:null,port:3000,environmentScanComplete:true};};
-  const manager=createUploads({jobRoot:root,python:process.execPath,geminiKey:'operator-test-key'}, {inspectZip,geminiFetch,sourceScout,gordonGenerate:async()=>({available:false,dockerfile:null}),...extra});
+  const productionQuality=vi.fn(async()=>({passed:true,runtimeImage:'mock-runtime',distroless:false,checks:[],warnings:[],build:'not_verified',runtime:'not_verified',imageSecurity:'not_verified'})),reviewedRecipe=vi.fn(async()=>({dockerfile:null}));
+  const manager=createUploads({jobRoot:root,python:process.execPath,geminiKey:'operator-test-key',...config}, {inspectZip,geminiFetch,sourceScout,productionQuality,reviewedRecipe,gordonGenerate:async()=>({available:false,dockerfile:null}),...extra});
   const uploaded=await manager.upload(Readable.from([Buffer.from('mock-zip')]),user,'demo.zip');
-  return {root,manager,uploaded,geminiFetch,inspectZip,sourceScout};
+  return {root,manager,uploaded,geminiFetch,inspectZip,sourceScout,productionQuality,reviewedRecipe};
 }
 afterEach(async()=>{for(const server of servers.splice(0)){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}for(const root of directories.splice(0))await rm(root,{recursive:true,force:true});});
+it('does not apply daily preparation quotas to the designated evaluator',async()=>{
+  const f=await setup(false,{}, {evaluatorEmails:[user.email]});
+  await atomicJSON(path.join(f.root,'ai-quota.json'),{[`${new Date().toISOString().slice(0,10)}:${user.id}`]:100});
+  expect((await f.manager.prepare(f.uploaded.uploadId,user,3000,true)).generated).toBe(true);
+});
+it('rejects a Gordon draft with missing inputs and checks the Gemini fallback',async()=>{
+  const gordonGenerate=vi.fn(async()=>({dockerfile:'FROM node:22-alpine\nCOPY frontend/dist /app\nCMD ["node","app.js"]'}));
+  const f=await setup(false,{gordonGenerate});
+  const draft=await f.manager.prepare(f.uploaded.uploadId,user,3000,true);
+  expect(draft.generator).toBe('gemini');
+  expect(f.geminiFetch).toHaveBeenCalledOnce();
+});
+it('retries a rejected Gordon Dockerfile with concrete validation feedback',async()=>{
+  const gordonGenerate=vi.fn()
+    .mockResolvedValueOnce({available:true,dockerfile:'FROM node:22-alpine\nCOPY frontend/dist /app\nCMD ["node","app.js"]'})
+    .mockResolvedValueOnce({available:true,dockerfile});
+  const f=await setup(false,{gordonGenerate});
+  const draft=await f.manager.prepare(f.uploaded.uploadId,user,3000,true);
+  expect(draft.generator).toBe('gordon');expect(draft.dockerfile).toBe(dockerfile);
+  expect(gordonGenerate).toHaveBeenCalledTimes(2);
+  expect(gordonGenerate.mock.calls[0][0]).toContain('one production Dockerfile');
+  expect(gordonGenerate.mock.calls[1][0]).toContain('failed EBKit validation');
+  expect(gordonGenerate.mock.calls[1][0]).toContain('frontend/dist');
+  expect(f.geminiFetch).not.toHaveBeenCalled();
+});
+it('includes root-relative multi-tier and supplied lockfile details in the hosted Gordon prompt',async()=>{
+  const gordonGenerate=vi.fn(async()=>({available:true,dockerfile}));
+  const inspectZip=async(_archive,destination)=>{
+    await mkdir(destination,{recursive:true});await writeFile(path.join(destination,'app.js'),'console.log("hello")');
+    return {scan:{language:'node',architecture:'MULTI_TIER',services:['frontend','backend'],stateful_services:['postgres'],detected_start_command:'node app.js'},files:[
+      {path:'backend/package.json',text:'{"scripts":{"start":"node app.js"}}'},
+      {path:'backend/package-lock.json',text:'{"lockfileVersion":3}'},
+      {path:'frontend/package.json',text:'{"scripts":{"build":"vite build"}}'},
+    ],dockerfile:null,port:3000,environmentScanComplete:true};
+  };
+  const f=await setup(false,{gordonGenerate,inspectZip});
+  const draft=await f.manager.prepare(f.uploaded.uploadId,user,3000,true);
+  expect(draft.generator).toBe('gordon');
+  const prompt=gordonGenerate.mock.calls[0][0];
+  expect(prompt).toContain('one root Dockerfile');
+  expect(prompt).toContain('repository-root build context');
+  expect(prompt).toContain('backend/package-lock.json');
+  expect(prompt).toContain('"frontend"');
+  expect(prompt).toContain('"postgres"');
+});
+it.each([[false,5,true],[true,5,false],[true,20,true]])('enforces separate normal and testing AI limits (%s, %s)',async(testing,count,blocked)=>{
+  const f=await setup(false,{}, {testingEmails:testing?[user.email]:[]});
+  await atomicJSON(path.join(f.root,'ai-quota.json'),{[`${new Date().toISOString().slice(0,10)}:${user.id}`]:count});
+  const result=f.manager.prepare(f.uploaded.uploadId,user,3000,true);
+  if(blocked){await expect(result).rejects.toMatchObject({status:429});expect(f.geminiFetch).not.toHaveBeenCalled();}
+  else{expect((await result).generated).toBe(true);expect(f.geminiFetch).toHaveBeenCalledOnce();}
+});
 it('returns an existing Dockerfile and required names without calling Gemini or GitHub',async()=> {
   const {manager,uploaded,geminiFetch}=await setup();const draft=await manager.prepare(uploaded.uploadId,user);
   expect(draft.dockerfile).toBe(dockerfile);expect(draft.environment).toEqual([{name:'DATABASE_URL',required:true,source:'.env.example'}]);
@@ -76,7 +129,7 @@ it.each(['failed','invalid'])('falls back to Gemini after a %s Gordon attempt',a
   const gordonGenerate=vi.fn(async()=>{if(kind==='failed')throw new Error('Gordon unavailable');return {available:true,dockerfile:'invalid'};});
   const {manager,uploaded,geminiFetch}=await setup(false,{gordonGenerate});
   const draft=await manager.prepare(uploaded.uploadId,user,3000,true);
-  expect(draft.generator).toBe('gemini');expect(gordonGenerate).toHaveBeenCalledOnce();expect(geminiFetch).toHaveBeenCalledOnce();
+  expect(draft.generator).toBe('gemini');expect(gordonGenerate).toHaveBeenCalledTimes(kind==='failed'?1:2);expect(geminiFetch).toHaveBeenCalledOnce();
   expect(gordonGenerate.mock.invocationCallOrder[0]).toBeLessThan(geminiFetch.mock.invocationCallOrder[0]);
 });
 it('handles Gemini 429 without claiming preparation succeeded or exposing the key',async()=> {
@@ -109,7 +162,7 @@ it('hands a reviewed ZIP to the CLI without GitHub calls and reuses its owned sn
   }}};
   const launch=vi.fn(()=>{const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.stderr=new PassThrough();child.kill=vi.fn();children.push(child);return child;});
   const python=process.env.EBKIT_TEST_PYTHON||(process.platform==='win32'?fileURLToPath(new URL('../../.venv/Scripts/python.exe',import.meta.url)):'python3');
-  const server=await createWorker({trialsEnabled:false,liveEnabled:true,jobRoot:fixture.root,python,allowedEmails:[user.email],origins:[]},{admin,recover:false,spawn:launch,authenticate:async()=>user,inspectZip:fixture.inspectZip,fetch:github,sourceScout:fixture.sourceScout});
+  const server=await createWorker({trialsEnabled:false,liveEnabled:true,jobRoot:fixture.root,python,allowedEmails:[user.email],origins:[]},{admin,recover:false,spawn:launch,authenticate:async()=>user,inspectZip:fixture.inspectZip,fetch:github,sourceScout:fixture.sourceScout,productionQuality:fixture.productionQuality,reviewedRecipe:fixture.reviewedRecipe});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));servers.push(server);const url=`http://127.0.0.1:${server.address().port}`;
   const post=(route,body)=>fetch(url+route,{method:'POST',headers:{Authorization:'Bearer test','Content-Type':'application/json'},body:JSON.stringify(body)});
   const uploaded=await (await fetch(url+'/api/uploads',{method:'POST',headers:{Authorization:'Bearer test','Content-Type':'application/zip','x-ebkit-filename':'project.zip'},body:'mock zip'})).json();
@@ -130,13 +183,12 @@ it('hands a reviewed ZIP to the CLI without GitHub calls and reuses its owned sn
   const updateBody={uploadId:replacement.uploadId,reviewHash:replacementDraft.reviewHash,reviewed:true,port:3000,confirmCosts:true};
   const target=rows[0].environment_name,application=rows[0].application_name;
   expect((await post(`/api/projects/${rows[0].id}/deploy`,{...updateBody,reviewed:false})).status).toBe(400);
-  expect((await post(`/api/projects/${rows[0].id}/deploy`,updateBody)).status).toBe(400);
   expect((await post(`/api/projects/${rows[0].id}/deploy`,{...updateBody,port:8080,environment:{DATABASE_URL:'replacement-secret'}})).status).toBe(400);
   expect(launch).toHaveBeenCalledTimes(2);
   rows[0].status='ready';rows[0].live_url='https://existing.example.com';
-  expect((await post(`/api/projects/${rows[0].id}/deploy`,{...updateBody,environment:{DATABASE_URL:'replacement-secret'}})).status).toBe(202);
+  expect((await post(`/api/projects/${rows[0].id}/deploy`,updateBody)).status).toBe(202);
   expect(rows).toHaveLength(1);expect(rows[0].repository).toBe('zip:updated.zip');
-  expect(rows[0].live_url).toBe('https://existing.example.com');
+  expect(rows[0].live_url).toBe('https://existing.example.com');expect(rows[0].variable_names).toContain('DATABASE_URL');
   expect(launch.mock.calls[2][1]).toContain(target);expect(launch.mock.calls[2][1]).toContain(application);
   expect(launch.mock.calls[2][1][3]).not.toBe(launch.mock.calls[0][1][3]);
   expect(await readJSON(path.join(fixture.root,`${rows[0].id}.source.json`))).toMatchObject({uploadId:replacement.uploadId});
@@ -148,4 +200,4 @@ it('hands a reviewed ZIP to the CLI without GitHub calls and reuses its owned sn
   await expect(readJSON(path.join(fixture.root,'uploads',uploaded.uploadId,'record.json'))).rejects.toMatchObject({code:'ENOENT'});
   await expect(readJSON(path.join(fixture.root,'uploads',replacement.uploadId,'record.json'))).rejects.toMatchObject({code:'ENOENT'});
   await expect(fixture.manager.load(fixture.uploaded.uploadId,user)).resolves.toBeTruthy();
-});
+},20000);

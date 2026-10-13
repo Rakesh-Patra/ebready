@@ -21,6 +21,7 @@ it('requires consent before preparing a ZIP and passes the draft for review',asy
 it('shows the actual Dockerfile and hides the prepared ZIP download until reviewed',async()=>{
   const user=userEvent.setup(),onReviewed=vi.fn();render(<ZipSource prepared={draft} onPrepared={vi.fn()} reviewed={false} onReviewed={onReviewed} signedIn login={vi.fn()} port={3000} onPort={vi.fn()}/>);
   expect(document.querySelector('pre')?.textContent).toBe(draft.dockerfile);expect(screen.queryByRole('button',{name:'Download prepared ZIP'})).toBeNull();
+  await user.click(screen.getByRole('button',{name:'Review Dockerfile to continue'}));
   await user.click(screen.getByRole('checkbox'));expect(onReviewed).toHaveBeenCalledWith(true);
 });
 it.each([['gordon','Docker AI (Gordon) draft'],['gemini','Gemini draft']] as const)('identifies the %s generator on the review screen',(generator,title)=>{
@@ -29,8 +30,9 @@ it.each([['gordon','Docker AI (Gordon) draft'],['gemini','Gemini draft']] as con
 });
 it('shows Scout findings and requires explicit acknowledgement before a bypass action appears',async()=>{
   const user=userEvent.setup();render(<ZipSource prepared={{...draft,scout:{gate_passed:false,summary:'1 Critical, 7 High',details:[]}}} onPrepared={vi.fn()} reviewed={false} onReviewed={vi.fn()} signedIn login={vi.fn()} port={3000} onPort={vi.fn()}/>);
-  expect(screen.getByText('Fix the reported dependencies and upload a new ZIP. Deployment is blocked.')).toBeTruthy();
+  expect(screen.getByText('Update vulnerable dependencies, then upload a new ZIP. Deployment is blocked.')).toBeTruthy();
   expect(screen.queryByRole('button',{name:'Prepare with Scout bypass'})).toBeNull();
+  await user.click(screen.getByText('Advanced options'));
   await user.click(screen.getByRole('checkbox',{name:/explicitly choose to bypass Scout/}));
   expect(screen.getByRole('button',{name:'Prepare with Scout bypass'})).toBeTruthy();
 });

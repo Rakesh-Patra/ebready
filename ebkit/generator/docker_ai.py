@@ -27,6 +27,8 @@ from typing import Optional
 
 from ebkit.analyzer.scanner import ProjectScanner, ScanResult
 from ebkit.models.deployment_config import DeploymentConfig
+from ebkit.generator.production_recipe import production_recipe
+from ebkit.validator.production import POLICY_PROMPT, require_quality, requires_distroless
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +140,16 @@ class DockerAIService:
         Returns:
             (dockerfile_content, explanation_or_error)
         """
+        if working_dir and (not scan or scan.architecture != "MULTI_TIER"):
+            try:
+                reviewed = production_recipe(config, working_dir)
+                if reviewed:
+                    require_quality(reviewed, config.port, require_distroless=True)
+                    from ebkit.validator.build_inputs import check_build_inputs
+                    check_build_inputs(working_dir, reviewed)
+                    return reviewed, "Generated from an EBKit reviewed distroless recipe (static quality passed; build/runtime/image CVEs require verification)."
+            except (ValueError, OSError) as error:
+                return None, f"Reviewed production recipe could not be validated: {error}"
         if not self.is_available():
             return self._generate_multitier_with_gemini(config, scan or ScanResult(), working_dir)
 
@@ -175,25 +187,36 @@ Requirements:
 """
         if scan and scan.architecture == "MULTI_TIER":
             prompt = (
-                "Generate one root-context multi-stage Dockerfile for all application "
-                "services described below. Return only a ```dockerfile fenced code "
-                "block. Do not call tools, read files, modify files, or execute builds.\n"
+                "Generate one production-ready Dockerfile at the repository root, using "
+                "the repository root as its Docker build context. It must build every "
+                "required application tier and run the user-facing application in one "
+                "production container; do not return Compose/Dockerrun configuration "
+                "or omit a required tier. Return only a ```dockerfile fenced code block. "
+                "Do not call tools, read files, modify files, or execute builds.\n"
                 f"Public application listener: 0.0.0.0:{port}.\n"
-                "Infer build and runtime commands from the service metadata. Run "
-                "compiled applications as compiled executables, rather than a "
-                "development command. Build frontend assets with their build dependencies "
-                "installed; never omit dev dependencies before a frontend build. "
+                "Use only the supplied service/build metadata; all COPY paths are "
+                "relative to the repository-root build context. Build frontend assets "
+                "with development dependencies available. Run compiled applications "
+                "as compiled executables, not development commands. Never run npm ci "
+                "unless package-lock.json or npm-shrinkwrap.json is present and copied "
+                "into that stage; use only the detected package manager and lockfiles. "
+                "Do not suppress failed build commands with || true. "
                 "Keep databases and caches external and read connection settings "
                 "from runtime environment variables. Do not embed values or placeholders. "
                 "Use versioned base images compatible with each detected runtime, "
                 "defaulting to public Docker Hub official images. Existing image "
                 "names are hints, not requirements: do not require a specialty "
-                "registry unless the user configured one for deployment. "
-                "multi-stage builds, and a non-root final user. If services need separate "
+                "registry unless the user configured one for deployment. Use "
+                "multi-stage builds and a non-root final user. If services need separate "
                 "processes, provide production-capable process management and request routing; "
                 "if the backend serves frontend assets, use that existing capability. "
                 f"Expose only port {port}.\n"
                 + self._multitier_build_contract(scan, working_dir)
+            )
+        prompt += POLICY_PROMPT
+        if scan and scan.architecture == "MULTI_TIER":
+            return self._generate_multitier_with_gordon(
+                prompt, config, scan, working_dir
             )
         try:
             raw_output = self.ask_gordon(prompt, working_dir=working_dir)
@@ -208,6 +231,7 @@ Requirements:
 
             # Normalize and enforce required Cluster Mode safety items
             dockerfile = self._ensure_cluster_mode_safety(dockerfile, config)
+            require_quality(dockerfile, config.port, requires_distroless(config.language.value, config.runtime_version))
             if scan and scan.architecture == "MULTI_TIER":
                 validation_error = self._multitier_dockerfile_error(
                     dockerfile, config, scan, working_dir
@@ -230,6 +254,60 @@ Requirements:
             if scan and scan.architecture == "MULTI_TIER":
                 return fallback
             return None, str(exc)
+
+    def _generate_multitier_with_gordon(
+        self,
+        prompt: str,
+        config: DeploymentConfig,
+        scan: ScanResult,
+        working_dir: Optional[Path],
+    ) -> tuple[Optional[str], str]:
+        """Retry one rejected multi-tier draft with its concrete validation findings."""
+        from ebkit.validator.build_inputs import check_build_inputs
+
+        last_error = "Docker AI (Gordon) did not return a valid Dockerfile code block."
+        for attempt in range(2):
+            try:
+                raw_output = self.ask_gordon(prompt, working_dir=working_dir)
+            except Exception as exc:
+                logger.warning("Docker AI multi-tier generation failed: %s", exc)
+                last_error = f"Docker AI (Gordon) failed to generate the Dockerfile: {exc}"
+                break
+
+            dockerfile = self.extract_dockerfile(raw_output)
+            if not dockerfile:
+                last_error = "Docker AI (Gordon) did not return a valid Dockerfile code block."
+            else:
+                try:
+                    dockerfile = self._ensure_cluster_mode_safety(dockerfile, config)
+                    require_quality(
+                        dockerfile,
+                        config.port,
+                        requires_distroless(config.language.value, config.runtime_version),
+                    )
+                    if working_dir:
+                        check_build_inputs(working_dir, dockerfile)
+                    validation_error = self._multitier_dockerfile_error(
+                        dockerfile, config, scan, working_dir
+                    )
+                    if not validation_error:
+                        return dockerfile, "Generated successfully by Docker AI (Gordon) and passed static production checks."
+                    last_error = validation_error
+                except (ValueError, OSError) as exc:
+                    last_error = str(exc)
+
+            if attempt == 0:
+                prompt += (
+                    "\nYour previous Dockerfile was rejected by EBKit's production "
+                    "validation. Regenerate the complete root-context Dockerfile and "
+                    "correct every finding below; preserve all application tiers and "
+                    "do not merely explain the changes:\n- "
+                    + last_error.replace("\n", "\n- ")
+                )
+
+        return self._gemini_multitier_fallback(
+            config, scan, working_dir, last_error
+        )
 
     def _gemini_multitier_fallback(
         self,
@@ -380,6 +458,8 @@ Requirements:
 - Build all application tiers needed for the user-facing application, then run
   them together in one container using a reliable process manager/reverse proxy
   when the architecture requires it. Do not silently omit a tier.
+- Build generated assets inside Docker. Never assume dist/build directories or
+  compiled binaries already exist in the source; copy them from their build stage.
 - Frontend builders must install build/dev dependencies; do not use --omit=dev,
   --production, or NODE_ENV=production before running the frontend build.
 - Run each build in its detected build_directory where its manifest lives.
@@ -397,6 +477,7 @@ Requirements:
   than returning a knowingly incomplete Dockerfile.
 """
         prompt += cls._multitier_build_contract(scan, working_dir)
+        prompt += POLICY_PROMPT
         payload = json.dumps(
             {
                 "contents": [{"parts": [{"text": prompt}]}],
@@ -427,6 +508,7 @@ Requirements:
                 if not dockerfile:
                     return None, "Gemini did not return a complete Dockerfile."
                 dockerfile = cls._ensure_cluster_mode_safety(dockerfile, config)
+                require_quality(dockerfile, config.port, requires_distroless(config.language.value, config.runtime_version))
                 validation_error = cls._multitier_dockerfile_error(
                     dockerfile, config, scan, working_dir
                 )
@@ -727,6 +809,7 @@ Rules:
 6. Do NOT modify any application source code. Fix ONLY the Dockerfile.
 7. Do NOT copy or expose any .env files or secrets.
 """
+        prompt += POLICY_PROMPT
         try:
             raw_output = self.ask_gordon(prompt, working_dir=working_dir)
             diagnosis = self.extract_diagnosis(raw_output)
@@ -739,6 +822,7 @@ Rules:
 
             # Ensure safety
             repaired_dockerfile = self._ensure_cluster_mode_safety(repaired_dockerfile, config)
+            require_quality(repaired_dockerfile, config.port, requires_distroless(config.language.value, config.runtime_version))
             return repaired_dockerfile, diagnosis
         except Exception as exc:
             logger.warning("Docker AI diagnosis and repair failed: %s", exc)
@@ -798,64 +882,19 @@ Rules:
         return text
 
     @staticmethod
-    def _ensure_cluster_mode_safety(dockerfile: str, config: DeploymentConfig) -> str:
+    def _ensure_cluster_mode_safety(dockerfile: str, config: Optional[DeploymentConfig] = None) -> str:
+        """Only make a trusted distroless nonroot default explicit in its final stage.
+
+        Never invent an account, run useradd, guess image tags or change ports.
+        All other failures must pass through the production gate/fallback.
         """
-        Safety guard: ensure Dockerfile adheres to Cluster Mode requirements.
-        - Adds --platform=linux/amd64 if omitted
-        - Replaces :latest tags if present
-        - Ensures non-root user exists
-        - Ensures EXPOSE matches config port
-        """
-        lines = dockerfile.splitlines()
-        updated_lines = []
-        has_platform = False
-        has_user = False
-        has_expose = False
-
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("FROM "):
-                # Replace :latest
-                line = re.sub(r":latest\b", ":slim", line)
-                if "--platform=" not in line:
-                    line = line.replace("FROM ", "FROM --platform=linux/amd64 ", 1)
-                has_platform = True
-            elif stripped.startswith("USER "):
-                has_user = True
-            elif stripped.startswith("EXPOSE "):
-                has_expose = True
-                # Ensure correct port
-                line = f"EXPOSE {config.port}"
-
-            updated_lines.append(line)
-
-        # If USER is missing, add standard appuser
-        if not has_user:
-            # Insert before CMD or ENTRYPOINT
-            inserted = False
-            final_lines = []
-            for l in updated_lines:
-                if not inserted and (l.strip().startswith("CMD ") or l.strip().startswith("ENTRYPOINT ")):
-                    final_lines.append("RUN useradd -m -u 1000 appuser || true")
-                    final_lines.append("USER appuser")
-                    inserted = True
-                final_lines.append(l)
-            if not inserted:
-                final_lines.append("RUN useradd -m -u 1000 appuser || true")
-                final_lines.append("USER appuser")
-            updated_lines = final_lines
-
-        # If EXPOSE is missing, add it before CMD
-        if not has_expose:
-            final_lines = []
-            inserted = False
-            for l in updated_lines:
-                if not inserted and (l.strip().startswith("CMD ") or l.strip().startswith("ENTRYPOINT ")):
-                    final_lines.append(f"EXPOSE {config.port}")
-                    inserted = True
-                final_lines.append(l)
-            if not inserted:
-                final_lines.append(f"EXPOSE {config.port}")
-            updated_lines = final_lines
-
-        return "\n".join(updated_lines) + "\n"
+        lines=dockerfile.strip().splitlines()
+        stages=[index for index,line in enumerate(lines) if re.match(r'\s*FROM\s+',line,re.I)]
+        if stages:
+            start=stages[-1]
+            match=re.match(r'\s*FROM\s+(?:--\S+\s+)*(\S+)',lines[start],re.I)
+            trusted=match and re.fullmatch(r'gcr\.io/distroless/[a-z0-9-]+-debian13:nonroot(?:@sha256:[a-f0-9]{64})?',match[1])
+            if trusted and not any(re.match(r'\s*USER\s+',line,re.I) for line in lines[start+1:]):
+                position=next((index for index in range(start+1,len(lines)) if re.match(r'\s*(?:CMD|ENTRYPOINT)\s+',lines[index],re.I)),len(lines))
+                lines.insert(position,'USER 65532:65532')
+        return '\n'.join(lines)+'\n'

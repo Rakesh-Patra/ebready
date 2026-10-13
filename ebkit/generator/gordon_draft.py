@@ -11,6 +11,8 @@ def generate(prompt: str) -> dict:
         # No project directory or tools: metadata/manifests are already in the prompt.
         text = service.ask_gordon(prompt, timeout=60)
         dockerfile = service.extract_dockerfile(text)
+        if dockerfile:
+            dockerfile = DockerAIService._ensure_cluster_mode_safety(dockerfile)
         return {'available': True, 'dockerfile': dockerfile}
     except Exception:
         return {'available': True, 'dockerfile': None}

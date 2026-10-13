@@ -2,10 +2,18 @@ import { mkdir, readFile, writeFile, rename, readdir, rm } from 'node:fs/promise
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-export async function atomicJSON(file, value) {
+export async function atomicJSON(file, value, replace = rename) {
   const temporary = `${file}.${randomUUID()}.tmp`;
   await writeFile(temporary, JSON.stringify(value), { mode: 0o600 });
-  try { await rename(temporary, file); } finally { await rm(temporary, { force: true }); }
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try { await replace(temporary, file); break; }
+      catch (error) {
+        if (!['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt >= 7) throw error;
+        await new Promise(resolve => setTimeout(resolve, Math.min(500, 25 * 2 ** attempt)));
+      }
+    }
+  } finally { await rm(temporary, { force: true }); }
 }
 export async function readJSON(file) { return JSON.parse(await readFile(file, 'utf8')); }
 export async function removeJobDirectory(root, directory) {

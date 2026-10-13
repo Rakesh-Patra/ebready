@@ -48,7 +48,17 @@ export function parseEnv(text: string) {
   }
   return values;
 }
+export function quoteEnvValues(text:string){
+  return text.split(/\r?\n/).map(line=>{
+    const match=line.match(/^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*)(.*)$/);
+    if(!match)return line;
+    const value=match[2].trim();
+    if(!value||value.includes('"')||(value.startsWith("'")&&value.endsWith("'")))return line;
+    if(/^[a-z][a-z0-9+.-]*:\/\//i.test(value)||/[\s&#?;=$]/.test(value))return `${match[1]}"${value}"`;
+    return line;
+  }).join('\n');
+}
 export function message(error: unknown) { return error instanceof Error ? error.message : 'The request could not be completed. Please try again.'; }
 
-export type TrialAccount={approved:boolean;trialUsed:boolean;durationMinutes:number;capacity?:number};
+export type TrialAccount={approved:boolean;trialUsed:boolean;durationMinutes:number|null;capacity?:number;testing?:boolean};
 export const getTrialAccount=()=>backend<TrialAccount>('/api/trial',{});

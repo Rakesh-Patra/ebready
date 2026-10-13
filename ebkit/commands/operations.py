@@ -26,6 +26,11 @@ _MAX_LOG_LINES = 500
 _MAX_DIAGNOSIS_RETRIES = 3
 
 
+class CleanupPending(click.ClickException):
+    """AWS has not reached a state that permits the next cleanup step."""
+    exit_code = 2
+
+
 def _region_option(region: str | None) -> str:
     config = load_config()
     return (
@@ -42,6 +47,8 @@ def _aws_session(region: str):
         account_id = session.client("sts").get_caller_identity()["Account"]
     except (BotoCoreError, ClientError) as exc:
         raise click.ClickException(f"Could not authenticate to AWS: {exc}") from exc
+    expected=os.environ.get("EBKIT_EXPECTED_AWS_ACCOUNT")
+    if expected and account_id!=expected:raise click.ClickException("AWS profile account does not match this worker account.")
     return session, account_id
 
 
@@ -558,6 +565,10 @@ def destroy_command(
     eb = session.client("elasticbeanstalk")
     try:
         current = eb.describe_environments(EnvironmentNames=[env_name], IncludeDeleted=True).get("Environments", [])
+        busy_states = [item.get("Status", "Unknown") for item in current if item.get("Status") not in ("Ready", "Terminated")]
+        if busy_states:
+            raise CleanupPending(f"Cleanup pending: AWS environment is {', '.join(sorted(set(busy_states)))}. "
+                                 "Retry after it reaches Ready or Terminated; charges may continue.")
         already_terminated = not current or all(item.get("Status") == "Terminated" for item in current)
         cluster_arn = deployment.get("cluster_arn")
         if not current and not cluster_arn and deployment.get("status") in ("BUILDING", "BUILD_SUCCEEDED"):
@@ -568,6 +579,8 @@ def destroy_command(
             cluster_arn = resources.get("Cluster", {}).get("ClusterArn") or resources.get("Cluster", {}).get("Name")
             eb.terminate_environment(EnvironmentName=env_name)
     except (BotoCoreError, ClientError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
+        if isinstance(exc, ClientError) and exc.response.get("Error", {}).get("Code") == "InvalidParameterValue" and "not eligible for termination" in str(exc).lower():
+            raise CleanupPending("Cleanup pending: AWS is busy. Retry after the environment reaches Ready or Terminated; charges may continue.") from None
         raise click.ClickException(f"Could not terminate environment '{env_name}': {exc}") from exc
     entries = _matching_deployments(account_id, selected_region, app_name, env_name)
     deployment = deployment or (entries[-1] if entries else {
@@ -596,7 +609,7 @@ def destroy_command(
             if (not environments and already_terminated) or (environments and all(item.get("Status") == "Terminated" for item in environments)):
                 break
             if time.monotonic() - started >= timeout:
-                raise click.ClickException("Environment termination is still pending. Artifact cleanup was not run; "
+                raise CleanupPending("Environment termination is still pending. Artifact cleanup was not run; "
                                            "charges may continue. Inspect environment events and retry destroy.")
             click.echo("Waiting for environment termination...")
             time.sleep(10)

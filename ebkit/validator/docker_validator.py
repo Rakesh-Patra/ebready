@@ -77,6 +77,7 @@ class DockerBuildValidator:
         image_tag: str = "ebkit-validate:latest",
         platform: Optional[str] = None,
         timeout: int = 300,
+        pull: bool = False,
     ) -> BuildResult:
         """
         Execute `docker build` against the directory.
@@ -89,6 +90,8 @@ class DockerBuildValidator:
             )
 
         cmd = [self.docker_cmd, "build", "-t", image_tag, str(context_dir)]
+        if pull:
+            cmd.append("--pull")
         if platform:
             cmd.extend(["--platform", platform])
 
@@ -221,6 +224,7 @@ class DockerScoutValidator:
             medium = 0
             low = 0
             cve_details: list[dict] = []
+            unknown_severity = 0
 
             # Try parsing JSON output
             try:
@@ -232,6 +236,8 @@ class DockerScoutValidator:
                 elif isinstance(data, dict):
                     vulnerabilities = data.get("vulnerabilities", [])
                     if "runs" in data:
+                        if not isinstance(data['runs'],list) or not data['runs'] or any(not isinstance(run.get('results'),list) for run in data['runs']):
+                            raise ValueError('Incomplete Scout SARIF report')
                         for run in data["runs"]:
                             rules = run.get("tool", {}).get("driver", {}).get("rules", [])
                             for finding in run.get("results", []):
@@ -290,6 +296,8 @@ class DockerScoutValidator:
                         medium += 1
                     elif "LOW" in sev:
                         low += 1
+                    else:
+                        unknown_severity += 1
 
             except Exception:
                 # Text fallback parsing
@@ -307,7 +315,7 @@ class DockerScoutValidator:
                     medium = int(med_m.group(1))
                 if low_m:
                     low = int(low_m.group(1))
-                if not any((crit_m, high_m, med_m, low_m)):
+                if not (crit_m and high_m):
                     return ScoutResult(
                         gate_passed=False,
                         summary="Docker Scout report could not be parsed.",
@@ -320,6 +328,9 @@ class DockerScoutValidator:
             # Security gate evaluation
             gate_passed = True
             reasons = []
+            if unknown_severity:
+                gate_passed = False
+                reasons.append(f'{unknown_severity} finding(s) have unknown severity; security cannot be verified.')
 
             if critical > self.max_critical:
                 gate_passed = False
@@ -584,6 +595,7 @@ class DockerRuntimeValidator:
         port: int = 8080,
         timeout: int = 60,
         health_check_path: Optional[str] = None,
+        bind_host: Optional[str] = None,
     ) -> RuntimeResult:
         """
         Run *image_tag* as a detached container mapping HOST_FREE_PORT -> CONTAINER_APPLICATION_PORT,
@@ -625,7 +637,7 @@ class DockerRuntimeValidator:
                 self.docker_cmd,
                 "run",
                 "-d",
-                "-p", f"{host_port}:{port}",
+                "-p", f"{bind_host + ':' if bind_host else ''}{host_port}:{port}",
                 "--name", self.container_name,
                 image_tag,
             ]

@@ -818,6 +818,12 @@ def init_command(
             shutil.rmtree(tmp_clone_dir, ignore_errors=True)
         sys.exit(1)
 
+    from ebkit.validator.build_inputs import check_build_inputs
+    try:
+        check_build_inputs(repo_path)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
     # Docker AI (Gordon) Dockerfile Generation
     docker_ai = DockerAIService()
     if docker_ai.is_available() or chosen_analyzer in ('gemini', 'google'):
@@ -843,6 +849,18 @@ def init_command(
 
     # ── Step 4: Safe File Writing ───────────────────────────────────────────
     click.echo("\n📦 Generating deployment kit...\n")
+    try:
+        check_build_inputs(repo_path, kit.files.get("Dockerfile", ""))
+        from ebkit.validator.production import require_quality, requires_distroless
+        quality = require_quality(kit.files.get("Dockerfile", ""), config.port, requires_distroless(config.language.value, config.runtime_version))
+        click.echo(f"✓ Dockerfile quality gate passed. Runtime: {quality['runtimeImage']}")
+        for warning in quality['warnings']:
+            click.echo(f"  Quality note: {warning}")
+        before_write = CrossFileValidator().validate(kit)
+        if not before_write.is_valid:
+            raise ValueError('Generated artifacts were rejected before saving: '+ '\n'.join(before_write.errors))
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     written: dict[str, str] = {}
     skipped: dict[str, str] = dict(kit.skipped)
 
@@ -860,7 +878,7 @@ def init_command(
     # If output dest_path is separate from repo_path, populate dest_path with source files
     if dest_path.resolve() != repo_path.resolve():
         for item in repo_path.iterdir():
-            if item.name.startswith(".git"):
+            if item.name.startswith(".git") or item.name in kit.files:
                 continue
             dest_item = dest_path / item.name
             if item.is_dir():
@@ -975,6 +993,10 @@ def init_command(
                         # Pre-rebuild safety validation
                         kit.files["Dockerfile"] = repaired_df
                         pre_val = validator.validate(kit)
+                        try:
+                            require_quality(repaired_df, config.port, requires_distroless(config.language.value, config.runtime_version))
+                        except ValueError as quality_error:
+                            pre_val.add_error(str(quality_error))
                         if not pre_val.is_valid:
                             err_msg = "\n".join(f"  * {e}" for e in pre_val.errors)
                             click.echo(f"❌ Repaired Dockerfile failed safety validation:\n{err_msg}", err=True)
@@ -1093,6 +1115,10 @@ def init_command(
                             click.echo("✓ Safe repair")
                             kit.files["Dockerfile"] = repaired_df
                             pre_val = validator.validate(kit)
+                            try:
+                                require_quality(repaired_df, config.port, requires_distroless(config.language.value, config.runtime_version))
+                            except ValueError as quality_error:
+                                pre_val.add_error(str(quality_error))
                             if not pre_val.is_valid:
                                 err_msg = "\n".join(f"  * {e}" for e in pre_val.errors)
                                 click.echo(f"❌ Repaired Dockerfile failed safety validation:\n{err_msg}", err=True)
@@ -1158,6 +1184,10 @@ def init_command(
                             click.echo("✓ Safe repair")
                             kit.files["Dockerfile"] = repaired_df
                             pre_val = validator.validate(kit)
+                            try:
+                                require_quality(repaired_df, config.port, requires_distroless(config.language.value, config.runtime_version))
+                            except ValueError as quality_error:
+                                pre_val.add_error(str(quality_error))
                             if not pre_val.is_valid:
                                 err_msg = "\n".join(f"  * {e}" for e in pre_val.errors)
                                 click.echo(f"❌ Repaired Dockerfile failed safety validation:\n{err_msg}", err=True)

@@ -393,3 +393,79 @@ def test_explicit_replica_limit_is_applied_on_creation_and_update():
     eb=MagicMock();eb.describe_configuration_settings.return_value={'ConfigurationSettings':[{'OptionSettings':[]}]}
     updated=_existing_environment_update_options(eb,'app','env',{},3000,max_replicas=1)
     assert {option['OptionName']:option['Value'] for option in updated if 'autoscaling' in option['Namespace']}=={'min-replica':'1','max-replica':'1'}
+
+
+def test_redeploy_reuses_saved_target_port_url_and_preserves_settings(monkeypatch, tmp_path):
+    from contextlib import ExitStack
+    from ebkit.deployment_state import save_deployment, load_deployments
+    monkeypatch.setenv("EBKIT_STATE_FILE", str(tmp_path / "state.json"))
+    saved = dict(account_id="123456789012", region="us-east-2", application_name="custom-app",
+                 environment_name="custom-env", source_url="https://github.com/example/repo.git",
+                 port=5000, url="https://stable.example.com", status="Ready")
+    save_deployment(saved)
+    session = MagicMock()
+    eb = session.client.return_value
+    eb.describe_configuration_settings.return_value = {"ConfigurationSettings": [{"OptionSettings": [
+        {"Namespace": "aws:elasticbeanstalk:eks:environment", "OptionName": "env-variables",
+         "Value": json.dumps({"DATABASE_URL": "keep-secret", "PORT": "5000"})}]}]}
+    with ExitStack() as stack:
+        def mock(name, **kwargs):
+            return stack.enter_context(patch("ebkit.commands.deploy." + name, **kwargs))
+        mock("load_config", return_value=None)
+        mock("_check_aws_credentials", return_value=(True, "123456789012", None))
+        mock("_collect_env_vars", return_value={})
+        mock("boto3.Session", return_value=session)
+        for name in ["_ensure_ecr_repo", "_verify_ecr_image", "_ensure_eb_application", "_register_cluster_version"]:
+            mock(name)
+        mock("_provision_cluster_infrastructure", return_value={})
+        ensure = mock("_ensure_cluster_environment", return_value=False)
+        build = mock("_build_image_in_aws", return_value={"project_name": "build", "build_id": "new-build"})
+        for source in ["https://github.com/Example/repo", "https://github.com/example/repo.git"]:
+            result = _execute_deploy(source, None, None, None, None, False, None, (), False)
+            assert result["url"] == saved["url"]
+        images = [call.kwargs["image_uri"] for call in build.call_args_list]
+        assert images[0] != images[1]
+        assert all(call.args[1:3] == ("custom-app", "custom-env") for call in ensure.call_args_list)
+        for call in eb.update_environment.call_args_list:
+            assert call.kwargs["EnvironmentName"] == "custom-env"
+            assert "CNAMEPrefix" not in call.kwargs
+            options = {item["OptionName"]: item["Value"] for item in call.kwargs["OptionSettings"]}
+            assert options["service-port"] == "5000"
+            assert json.loads(options["env-variables"]) == {"DATABASE_URL": "keep-secret", "PORT": "5000"}
+            assert "max-replica" not in options
+    records = load_deployments()
+    assert len(records) == 1 and records[0]["url"] == saved["url"]
+
+
+def test_redeploy_rejects_ambiguous_saved_targets_before_build(monkeypatch):
+    mock_record = dict(account_id="123", region="us-east-2", source_url="https://github.com/a/b")
+    monkeypatch.setattr("ebkit.commands.deploy.load_config", lambda: None)
+    monkeypatch.setattr("ebkit.commands.deploy._check_aws_credentials", lambda: (True, "123", None))
+    monkeypatch.setattr("ebkit.commands.deploy.load_deployments", lambda: [mock_record, mock_record])
+    with patch("ebkit.commands.deploy._build_image_in_aws") as build:
+        with pytest.raises(click.ClickException, match="Multiple saved targets"):
+            _execute_deploy("https://github.com/a/b", None, None, "us-east-2", None, False, None, (), False)
+        build.assert_not_called()
+
+
+def test_codebuild_pins_detected_github_commit():
+    codebuild = MagicMock()
+    codebuild.start_build.return_value = {"build": {"id": "build:commit"}}
+    codebuild.batch_get_builds.return_value = {"builds": [{"buildStatus": "SUCCEEDED"}]}
+    with patch("ebkit.commands.deploy._ensure_iam_role", return_value="arn:aws:iam::123:role/build"):
+        _build_image_in_aws(MagicMock(), codebuild, "123", "us-east-2", "app", "app",
+                            "https://github.com/a/b", "123.dkr.ecr.us-east-2.amazonaws.com/app:v1", commit="a"*40)
+    assert codebuild.start_build.call_args.kwargs["sourceVersion"] == "a"*40
+
+
+@pytest.mark.parametrize("source,commit", [("https://github.com/a/b", "main"), ("changed.zip", "a"*40)])
+def test_commit_option_rejects_unpinned_or_zip_sources(source, commit):
+    result = CliRunner().invoke(deploy, [source, "--commit", commit, "--yes"])
+    assert result.exit_code != 0 and "full GitHub commit SHA" in result.output
+
+
+def test_watch_update_never_creates_a_replacement_environment():
+    eb=MagicMock();eb.describe_environments.return_value={"Environments": []}
+    with pytest.raises(RuntimeError,match="will not be recreated"):
+        _ensure_cluster_environment(eb,"app","env","version",{}, {},8080,require_existing=True)
+    eb.create_environment.assert_not_called()

@@ -9,6 +9,7 @@ import { createClient, createAdminClient } from '@insforge/sdk';
 import { atomicJSON, readJSON, pendingJobs, lockJobs, alive, removeJobDirectory } from './jobs.mjs';
 import { createUploads } from './uploads.mjs';
 import {createTrials,trialColumns} from './trials.mjs';
+import {createGithubDeploys} from './github-deploys.mjs';
 
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -36,7 +37,7 @@ export async function validateRepository(input, request = fetch) {
 
 export function commandArguments(operation, project, body = {}) {
   const target = ['--app', project.application_name, '--environment', project.environment_name, '--region', project.region];
-  if (operation === 'deploy') return ['-m', 'ebkit.cli', 'deploy', body.sourceArchive || project.repository, ...target, '--port', String(project.port), '--yes', ...(project.plan==='free_trial'?['--max-replicas','1']:[]), ...(body.sourceArchive ? ['--reviewed'] : [])];
+  if (operation === 'deploy') return ['-m', 'ebkit.cli', 'deploy', body.sourceArchive || project.repository, ...target, '--port', String(project.port), '--yes', ...(project.plan==='free_trial'?['--max-replicas','1']:[]), ...(body.sourceArchive ? ['--reviewed'] : []), ...(body.githubCommit ? ['--commit', body.githubCommit] : [])];
   if (operation === 'scale') {
     if (!Number.isInteger(body.replicas) || body.replicas < 1 || body.replicas > 100) throw new HttpError(400, 'Replica count must be between 1 and 100.');
     return ['-m', 'ebkit.cli', 'scale', ...target, '--min', String(body.replicas), '--max', String(body.replicas), '--yes'];
@@ -45,9 +46,39 @@ export function commandArguments(operation, project, body = {}) {
     if (typeof body.version !== 'string' || !/^[A-Za-z0-9_.-]{1,100}$/.test(body.version)) throw new HttpError(400, 'Choose an existing version label.');
     return ['-m', 'ebkit.cli', 'rollback', ...target, '--version', body.version, '--yes'];
   }
+  if(operation==='production'){
+    const actions=['metrics','alarm','autoscale','cost','budget','leftovers','database-create','database-status','database-network','database-attach','database-check','database-migrate','database-snapshot','database-delete','pipeline'];
+    if(!actions.includes(body.action)||!body.configuration||typeof body.configuration!=='object'||Array.isArray(body.configuration))throw new HttpError(400,'Choose a supported production operation and JSON configuration.');
+    return ['-m','ebkit.cli','operations',body.action,...target,'--yes'];
+  }
+  if(operation==='config'){
+    if(body.unset!==undefined&&(!Array.isArray(body.unset)||body.unset.length>100||body.unset.some(key=>typeof key!=='string'||!/^[_A-Za-z][_A-Za-z0-9]*$/.test(key)||key==='PORT')))throw new HttpError(400,'Invalid variable names to remove.');
+    return ['-m','ebkit.cli','config',...target,...(body.unset??[]).flatMap(key=>['--unset',key]),...(body.environment||body.unset?.length?['--yes']:[])];
+  }
+  if(operation==='options'){
+    if(body.options!==undefined&&(!Array.isArray(body.options)||body.options.length>100||body.options.some(item=>!item||Object.keys(item).sort().join(',')!=='Namespace,OptionName,Value'||Object.values(item).some(value=>typeof value!=='string')||item.Value.length>4096)))throw new HttpError(400,'Invalid environment options.');
+    if(body.removeOptions!==undefined&&(!Array.isArray(body.removeOptions)||body.removeOptions.length>100||body.removeOptions.some(value=>typeof value!=='string'||!/^[-A-Za-z0-9_:.]+\/[-A-Za-z0-9_./: ]{1,255}$/.test(value))))throw new HttpError(400,'Invalid option names to remove.');
+    return ['-m','ebkit.cli','options',...target,...(body.removeOptions??[]).flatMap(value=>['--remove',value]),...(body.options||body.removeOptions?.length?['--yes']:['--json'])];
+  }
+  if(['config-save','config-apply'].includes(operation)){
+    if(!/^[A-Za-z0-9-]{1,40}$/.test(body.templateName??''))throw new HttpError(400,'Invalid configuration template name.');
+    return ['-m','ebkit.cli',operation,...target,'--name',`ebkit-${project.id}-${body.templateName}`,'--yes'];
+  }
+  if(operation==='version-delete'){
+    if(!/^[A-Za-z0-9_.-]{1,100}$/.test(body.version??''))throw new HttpError(400,'Choose an existing version label.');
+    return ['-m','ebkit.cli',operation,...target,'--version',body.version,'--yes'];
+  }
+  if(operation==='swap'){
+    if(!/^[-A-Za-z0-9]{3,40}$/.test(body.destinationEnvironment??''))throw new HttpError(400,'Choose an owned destination project.');
+    return ['-m','ebkit.cli','swap',...target,'--destination',body.destinationEnvironment,'--yes'];
+  }
+  if(operation==='clone'){
+    if(!/^[-A-Za-z0-9]{3,40}$/.test(body.sourceEnvironment??''))throw new HttpError(400,'Invalid clone source.');
+    return ['-m','ebkit.cli','clone','--app',project.application_name,'--environment',body.sourceEnvironment,'--region',project.region,'--name',project.environment_name,'--yes',...(project.plan==='free_trial'?['--max-replicas','1']:[])];
+  }
   if (operation === 'destroy' && body.confirmation !== project.environment_name) throw new HttpError(400, 'Type the exact environment name to confirm destruction.');
-  if (!['status','logs','versions','resources','cleanup-status','destroy'].includes(operation)) throw new HttpError(404, 'Unknown operation.');
-  return ['-m', 'ebkit.cli', operation, ...target, ...(['status','cleanup-status'].includes(operation) ? ['--json'] : [])];
+  if (!['status','logs','versions','resources','cleanup-status','destroy','health','events'].includes(operation)) throw new HttpError(404, 'Unknown operation.');
+  return ['-m', 'ebkit.cli', operation, ...target, ...(['status','cleanup-status','health','events'].includes(operation) ? ['--json'] : [])];
 }
 
 export function redact(text, secrets = []) {
@@ -76,7 +107,25 @@ export async function createWorker(config, dependencies = {}) {
   const release = recover ? await lockJobs(directoryRoot) : async () => {};
   let launches = 0, zipReplacing = false;
   const replacementAuthorization=Symbol('ZIP replacement');
-  const trials=config.trialsEnabled!==false&&config.liveEnabled&&admin?createTrials({admin,save,run,isBusy:()=>running.size>0||zipReplacing,capacity:config.globalCapacity??2,now:dependencies.now??Date.now}):null;
+  const trials=config.trialsEnabled!==false&&config.liveEnabled&&admin?createTrials({admin,save,run,isBusy:()=>running.size>0||zipReplacing,capacity:config.globalCapacity??2,testingEmails:config.testingEmails??[],evaluatorEmails:config.evaluatorEmails??[],now:dependencies.now??Date.now}):null;
+  const githubDeploys=config.githubAutoDeploy!==false&&config.liveEnabled&&admin?createGithubDeploys({
+    directory:directoryRoot,request:dependencies.fetch,token:config.githubToken,
+    isBusy:()=>closing||running.size>0||zipReplacing,
+    eligible:project=>{try{trials?.guard(project,'deploy',{});return true;}catch{return false;}},
+    list:async()=>{
+      const {data,error}=await admin.database.from('ebkit_web_projects').select(`${trialColumns},operation_running,variable_names,live_url`).eq('mode','live').order('id',{ascending:true}).limit(101);
+      if(error||!data||data.length>100)throw new Error('GitHub projects could not be loaded safely.');
+      const states=await Promise.all(data.map(item=>readJSON(path.join(directoryRoot,`${item.id}.pipeline.json`)).catch(()=>null)));
+      return data.filter((item,index)=>states[index]?.enabled!==true);
+    },
+    validate:async project=>{
+      const repository=await validateRepository(project.repository,dependencies.fetch);
+      const missing=requireEnvironment(repository.environment.filter(item=>!project.variable_names?.includes(item.name)),{});
+      if(missing.length)throw new Error(`Automatic deployment needs new environment settings: ${missing.join(', ')}. Redeploy manually with these settings.`);
+    },
+    run:(project,head)=>run('deploy',project,{githubCommit:head.sha}),
+    onError:async(project,error)=>{console.error(`GitHub auto-deploy check failed for ${project.id}: ${error.message}`);if(!running.size)await save(project.id,{last_error:`GitHub auto-deploy deferred: ${error.message}`}).catch(()=>{});}
+  }):null;
   async function save(id, changes) { const { error } = await admin.database.from('ebkit_web_projects').update(changes).eq('id', id); if (error) throw new HttpError(503, 'Could not save operation status.'); }
   async function authorized(req) {
     if (!config.liveEnabled || !admin) throw new HttpError(503, 'Live deployment worker is not configured.');
@@ -89,7 +138,7 @@ export async function createWorker(config, dependencies = {}) {
   }
   async function own(id, user) {
     if (!/^[0-9a-f-]{36}$/i.test(id)) throw new HttpError(404, 'Project not found.');
-    const { data, error } = await admin.database.from('ebkit_web_projects').select(trialColumns).eq('id', id).eq('user_id', user.id).limit(1);
+    const { data, error } = await admin.database.from('ebkit_web_projects').select(`${trialColumns},variable_names,live_url,operation_running`).eq('id', id).eq('user_id', user.id).limit(1);
     if (error) throw new HttpError(503, 'Could not load project.');
     if (!data?.[0] || data[0].mode !== 'live') throw new HttpError(404, 'Live project not found.');
     return data[0];
@@ -98,11 +147,13 @@ export async function createWorker(config, dependencies = {}) {
     if(!recovery)trials?.guard(project,operation,body);
     if(zipReplacing&&body[replacementAuthorization]!==true)throw new HttpError(409,'A ZIP replacement is being prepared. Wait for it to finish.');
     if (running.size) throw new HttpError(409, 'Another cloud operation is running. Wait for it to finish.');
+    if(body.profile&&(!(config.awsProfiles??[]).includes(body.profile)||!/^[-A-Za-z0-9_.]+$/.test(body.profile)||!/^\d{12}$/.test(config.awsAccountId??'')))throw new HttpError(403,'Choose a configured operator profile; the worker must have its AWS account ID configured.');
     const args = recovery ? [] : (dependencies.commandArguments ?? commandArguments)(operation, project, body);
-    const deadline=project.plan==='free_trial'?(['deploy','scale','rollback'].includes(operation)?Math.min(Date.now()+7200000,Date.parse(project.trial_expires_at)):Date.now()+(['destroy'].includes(operation)?7200000:60000)):Date.now()+7200000;
+    const deadline=project.plan==='free_trial'?(['deploy','scale','rollback','clone'].includes(operation)?Math.min(Date.now()+7200000,Date.parse(project.trial_expires_at)):Date.now()+(['destroy'].includes(operation)?7200000:60000)):Date.now()+7200000;
+    if(body.profile&&!recovery)args.splice(2,0,'--profile',body.profile);
     let envText = '', secrets = [];
     if (body.environment) {
-      if (operation !== 'deploy' || typeof body.environment !== 'object' || Array.isArray(body.environment)) throw new HttpError(400, 'Invalid environment settings.');
+      if (!['deploy','config'].includes(operation) || typeof body.environment !== 'object' || Array.isArray(body.environment)) throw new HttpError(400, 'Invalid environment settings.');
       const entries = Object.entries(body.environment);
       if (entries.length > 100 || entries.some(([key,value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== 'string' || /[\r\n\0]/.test(value) || value.length > 4096)) throw new HttpError(400, 'Use up to 100 valid environment settings with single-line values.');
       if (entries.some(([,value]) => value.includes('"'))) throw new HttpError(400, 'Environment values containing double quotes are not supported yet.');
@@ -114,20 +165,33 @@ export async function createWorker(config, dependencies = {}) {
       journalFile = recovery.file; journal = recovery.job; directory = journal.directory;
     } else {
     try {
+      if(operation==='deploy'){const file=path.join(directoryRoot,`${project.id}.release.json`);if(body.releasePolicy)await atomicJSON(file,body.releasePolicy);else body.releasePolicy=await readJSON(file).catch(()=>null);}
+      if(operation==='deploy'&&!body.sourceArchive&&project.repository.startsWith('https://github.com/')&&githubDeploys){
+        if(body.githubCommit){await githubDeploys.record(project,{sha:body.githubCommit});}
+        else{
+          try{const head=await githubDeploys.head(project.repository);args.push('--commit',head.sha);await githubDeploys.record(project,head);}
+          catch{console.error(`GitHub auto-deploy baseline could not be saved for ${project.id}; manual deployment continues.`);}
+        }
+      }
       await mkdir(directoryRoot, { recursive: true, mode: 0o700 });
       directory = await mkdtemp(path.join(directoryRoot, 'operation-'));
+      if(body.configuration){const file=path.join(directory,'operation.json');await writeFile(file,JSON.stringify(body.configuration),{mode:0o600});args.push('--file',file);}
+      if(body.releasePolicy){const file=path.join(directory,'release.json');await writeFile(file,JSON.stringify(body.releasePolicy),{mode:0o600});args.push('--release-policy',file);}
+      if(body.options){const file=path.join(directory,'options.json');await writeFile(file,JSON.stringify(body.options),{mode:0o600});args.push('--file',file);secrets.push(...body.options.map(item=>item.Value));}
       if (envText) { const secretFile = path.join(directory, '.env'); await writeFile(secretFile, envText, { mode: 0o600 }); args.push('--env-file', secretFile); }
       const changes = { operation_log: `Starting ${operation}...\n`, last_error: null, last_operation: operation, operation_running: true };
-      if (operation === 'deploy') Object.assign(changes, { status: 'deploying', stage: 2 });
+      if (['deploy','clone'].includes(operation)) Object.assign(changes, { status: 'deploying', stage: 2 });
       if (operation === 'destroy') changes.status = 'destroying';
       const childEnv = { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', EBKIT_STATE_FILE: path.join(directoryRoot, `${project.id}.json`), EBKIT_CONFIG_FILE: path.join(directory, 'config') };
-      delete childEnv.INSFORGE_API_KEY;
+      if(body.profile)childEnv.AWS_PROFILE=body.profile;
+      if(config.awsAccountId)childEnv.EBKIT_EXPECTED_AWS_ACCOUNT=config.awsAccountId;
+      delete childEnv.INSFORGE_API_KEY;delete childEnv.EBKIT_GITHUB_TOKEN;
       delete childEnv.GEMINI_API_KEY; delete childEnv.GOOGLE_API_KEY;
       if (durable) {
         journalFile = path.join(directoryRoot, `journal-${project.id}.json`);
-        journal = { id: randomUUID(), project, operation, body: { replicas: body.replicas, version: body.version }, directory, inputFile: path.join(directory, 'input.json'), state: 'prepared', started: Date.now(), deadline, applied: false };
-        const env = Object.fromEntries(['PYTHONUNBUFFERED','PYTHONIOENCODING','PYTHONUTF8','EBKIT_STATE_FILE','EBKIT_CONFIG_FILE'].map(key => [key, childEnv[key]]));
-        await atomicJSON(journal.inputFile, { python: config.python, args, cwd: root, env, secretFile: envText ? path.join(directory, '.env') : null, stdin: operation === 'destroy' ? `${project.environment_name}\n` : '' });
+        journal = { id: randomUUID(), project, operation, body: { replicas: body.replicas, version: body.version,unset:body.unset,environmentNames:Object.keys(body.environment??{}),destinationId:body.destinationId,action:body.action }, directory, inputFile: path.join(directory, 'input.json'), state: 'prepared', started: Date.now(), deadline, applied: false };
+        const env = Object.fromEntries(['PYTHONUNBUFFERED','PYTHONIOENCODING','PYTHONUTF8','EBKIT_STATE_FILE','EBKIT_CONFIG_FILE',...(config.awsAccountId?['EBKIT_EXPECTED_AWS_ACCOUNT']:[]),...(body.profile?['AWS_PROFILE']:[])].map(key => [key, childEnv[key]]));
+        await atomicJSON(journal.inputFile, { python: config.python, args, cwd: root, env, secretFile: envText ? path.join(directory, '.env') : null, optionsFile:body.options?path.join(directory,'options.json'):null, stdin: operation === 'destroy' ? `${project.environment_name}\n` : '' });
         await atomicJSON(journalFile, journal);
       }
       await save(project.id, changes);
@@ -160,13 +224,13 @@ export async function createWorker(config, dependencies = {}) {
       if (finished) return; finished = true; clearTimeout(timeout); clearTimeout(flushTimer);
       try {
         const changes = { operation_log: [redact(output, secrets), problem].filter(Boolean).join('\n') || 'Operation finished.', operation_running: false, last_error: code ? problem || 'Cloud operation failed. Review the operation log. Partial resources may remain.' : null };
-        if (operation === 'deploy') {
+        if (['deploy','clone'].includes(operation)) {
           let record;
-          try { record = JSON.parse(await readFile(path.join(directoryRoot, `${project.id}.json`), 'utf8')).deployments?.[0]; } catch {}
-          let healthy = !code && record?.status === 'Ready' && record?.health === 'Green';
+          try {const records=JSON.parse(await readFile(path.join(directoryRoot, `${project.id}.json`), 'utf8')).deployments??[];record=records.find(item=>item.environment_name===project.environment_name)??(records.length===1&&!records[0].environment_name?records[0]:undefined);} catch {}
+          let healthy = !code && record?.status === 'Ready' && record?.health === 'Green' && record?.release_verification!=='failed';
           if(project.plan==='free_trial'&&healthy){const deadline=await trials.start(project.id);Object.assign(changes,deadline);healthy=!!deadline.trial_started_at&&Date.parse(deadline.trial_expires_at)>Date.now();}
           if(project.plan==='free_trial'&&!healthy)Object.assign(changes,{trial_cleanup_state:'pending',trial_cleanup_next_at:new Date().toISOString()});
-          Object.assign(changes, { status: healthy ? 'ready' : 'failed', stage: healthy ? 6 : 2, health: record?.health ?? null, live_url: record?.url ?? null, revision: healthy && project.status === 'ready' ? project.revision + 1 : project.revision });
+          Object.assign(changes, { status: healthy ? 'ready' : 'failed', stage: healthy ? 6 : 2, health: record?.health ?? null, live_url: record?.url ?? project.live_url ?? null, revision: healthy && project.status === 'ready' ? project.revision + 1 : project.revision });
           if (!healthy && !code) changes.last_error = 'AWS did not report Ready / Green. Check status and logs; resources may still be running.';
         } else if (operation === 'status' && !code) {
           let live;
@@ -176,7 +240,8 @@ export async function createWorker(config, dependencies = {}) {
             Object.assign(changes, { status, health: live.health, live_url: status === 'destroyed' ? null : live.url });
           }
         } else if (operation === 'destroy') {
-          Object.assign(changes, { status: code ? 'failed' : 'destroyed', live_url: null });
+          Object.assign(changes, { status: code===2?'destroying':code ? 'failed' : 'destroyed', live_url: null });
+          if(code===2)changes.last_error=null;
           if(project.plan==='free_trial')Object.assign(changes,{trial_cleanup_state:code?'pending':'verifying',trial_cleanup_next_at:new Date(Date.now()+(code?Math.min(1800000,60000*2**Math.min(project.trial_cleanup_attempts??0,5)):60000)).toISOString()});
           if (!code) await uploads.removeProject(project.id);
         }
@@ -186,6 +251,10 @@ export async function createWorker(config, dependencies = {}) {
           Object.assign(changes,{trial_cleanup_state:complete?'complete':'verifying',trial_cleanup_next_at:complete?null:new Date(Date.now()+300000).toISOString()});
           if(!complete)changes.last_error='Cleanup verification is pending. AWS managed infrastructure may still incur charges.';
         }
+        else if(operation==='production'&&!code&&body.action==='pipeline')await atomicJSON(path.join(directoryRoot,`${project.id}.pipeline.json`),{enabled:true});
+        else if(operation==='production'&&!code&&body.action==='database-attach')changes.variable_names=[...new Set([...(project.variable_names??[]),'DATABASE_URL'])];
+        else if(operation==='config'&&!code&&(body.environment||body.environmentNames?.length||body.unset?.length))changes.variable_names=[...new Set([...(project.variable_names??[]),...(body.environmentNames??Object.keys(body.environment??{}))])].filter(key=>!(body.unset??[]).includes(key));
+        else if(operation==='swap'&&!code){changes.live_url=null;await save(body.destinationId,{live_url:null});}
         else if (operation === 'scale' && !code) changes.replicas = body.replicas;
         else if (operation === 'rollback' && !code) changes.revision = Math.max(1, project.revision - 1);
         await save(project.id, changes);
@@ -266,8 +335,10 @@ export async function createWorker(config, dependencies = {}) {
       if (route === '/api/repository') return reply(200, await validateRepository(body.repository, dependencies.fetch));
       const user = await authorized(req);
       if ('sourceArchive' in body) throw new HttpError(400,'Local source paths cannot be submitted through the API.');
-      const uploadRoute = route.match(/^\/api\/uploads\/([0-9a-f-]+)\/(prepare|download)$/i);
+      if(route==='/api/repository/import')return reply(200,await uploads.importGithub(user,body.repository));
+      const uploadRoute = route.match(/^\/api\/uploads\/([0-9a-f-]+)\/(prepare|download|doctor)$/i);
       if (uploadRoute) {
+        if (uploadRoute[2] === 'doctor') return reply(200, await uploads.doctor(uploadRoute[1], user, body));
         if (uploadRoute[2] === 'prepare') return reply(200, await uploads.prepare(uploadRoute[1], user, body.port, body.allowAI, body.skipScout === true, body.acknowledgeScoutBypass === true));
         const item = await uploads.reviewed(uploadRoute[1], user, body, false);
         const archive = await uploads.archive(item);
@@ -275,6 +346,7 @@ export async function createWorker(config, dependencies = {}) {
         res.writeHead(200, {'Content-Type':'application/zip','Content-Disposition':'attachment; filename="ebkit-prepared.zip"','Cache-Control':'no-store'});
         return res.end(data);
       }
+      if(route==='/api/profiles')return reply(200,{profiles:config.awsAccountId?config.awsProfiles??[]:[]});
       if(route==='/api/trial')return reply(200,trials?await trials.account(user):{approved:true,trialUsed:false,durationMinutes:30});
       if (route === '/api/deploy') {
         if (body.confirmCosts !== true) throw new HttpError(400, 'Confirm that AWS resources incur charges.');
@@ -292,14 +364,14 @@ export async function createWorker(config, dependencies = {}) {
         const missing = requireEnvironment(repository.environment, body.environment);
         if (missing.length) throw new HttpError(400, `Fill in required environment settings: ${missing.join(', ')}.`);
         if (!/^[a-z][a-z0-9-]{1,39}$/.test(body.name) || !['us-east-1','us-east-2','us-west-2','ap-south-1'].includes(body.region) || !Number.isInteger(body.port) || body.port < 1 || body.port > 65535) throw new HttpError(400, 'Invalid project name, region or port.');
-        const { data: existing, error: quotaError } = await admin.database.from('ebkit_web_projects').select('id').eq('user_id', user.id).eq('mode','live').neq('status','destroyed').limit(3);
+        const { data: existing, error: quotaError } = await admin.database.from('ebkit_web_projects').select('id').eq('user_id', user.id).eq('mode','live').neq('status','destroyed').limit(11);
         if (quotaError) throw new HttpError(503, 'Could not check deployment quota.');
-        if (existing.length >= 3) throw new HttpError(429, 'Destroy an existing live project before creating another.');
+        if (!(config.evaluatorEmails??[]).includes(user.email?.toLowerCase()) && existing.length >= ([...(config.testingEmails??[]),...(config.evaluatorEmails??[])].includes(user.email?.toLowerCase())?10:3)) throw new HttpError(429, 'Destroy an existing live project before creating another.');
         if (running.size) throw new HttpError(409,'Another cloud operation is running.');
         const id = randomUUID(); const application = `ebk-${id.replaceAll('-','').slice(0,16)}`;
         let project = { id, user_id: user.id, name: body.name, repository: repository.repository, region: body.region, port: body.port, mode: 'live', status: 'deploying', stage: 1, replicas: 1, revision: 1, variable_names: Object.keys(body.environment ?? {}), application_name: application, environment_name: `${application}-cluster` };
         let data;
-        if(trials){project=await trials.reserve(project);data=[project];}
+        if(trials){project=await trials.reserve(project,user);data=[project];}
         else{const result=await admin.database.from('ebkit_web_projects').insert([project]).select('*');if(result.error)throw new HttpError(503,'Could not save deployment.');data=result.data;}
         try {
           if (zipItem) {
@@ -315,7 +387,45 @@ export async function createWorker(config, dependencies = {}) {
       const match = route.match(/^\/api\/projects\/([0-9a-f-]+)\/([a-z-]+)$/i);
       if (!match) throw new HttpError(404, 'Endpoint not found.');
       const project = await own(match[1], user);
-      trials?.guard(project,match[2],body);
+      const operation=match[2];
+      if(operation==='production'){
+        const reads=['metrics','cost','leftovers','database-status','database-check','pipeline'];
+        const elevated=[...(config.testingEmails??[]),...(config.evaluatorEmails??[])].includes(user.email?.toLowerCase());
+        if(!reads.includes(body.action)&&(!elevated||body.confirmation!==project.environment_name))throw new HttpError(403,'This production operation requires designated access and exact environment confirmation.');
+        if(project.plan==='free_trial'&&!reads.includes(body.action))throw new HttpError(403,'Persistent databases, alarms, budgets and scaling policies require a deployment without a free-trial lifetime.');
+      }
+      if(body.profile&&(!(config.awsProfiles??[]).includes(body.profile)||!/^[-A-Za-z0-9_.]+$/.test(body.profile)||!/^\d{12}$/.test(config.awsAccountId??'')))throw new HttpError(403,'Choose a configured operator profile for this AWS account.');
+      if(project.plan==='free_trial'&&operation==='options'&&((body.options??[]).some(item=>item?.Namespace?.includes('autoscaling')&&item.Value!=='1')||(body.removeOptions??[]).some(item=>item.includes('autoscaling'))))throw new HttpError(403,'Free trials preserve one replica.');
+      const privileged=[...(config.testingEmails??[]),...(config.evaluatorEmails??[])].includes(user.email?.toLowerCase());
+      const mutations=['config-save','config-apply','clone','swap','version-delete'].includes(operation)||(operation==='options'&&(body.options||body.removeOptions?.length))||(operation==='config'&&(body.environment||body.unset?.length));
+      if(mutations&&body.confirmation!==project.environment_name)throw new HttpError(400,'Confirm the exact source environment name before making this change.');
+      if((['clone','swap','version-delete','config-save','config-apply'].includes(operation)||(operation==='options'&&(body.options||body.removeOptions?.length)))&&!privileged)throw new HttpError(403,'This operation requires an operator-designated testing or evaluator account.');
+      trials?.guard(project,operation,body,user,true);
+      if(operation==='swap'){
+        if(running.size||zipReplacing)throw new HttpError(409,'Another cloud operation is running.');
+        const destination=await own(body.destinationId,user);
+        trials?.guard(destination,'swap',body,user,true);
+        if(destination.id===project.id||destination.region!==project.region||destination.application_name!==project.application_name||destination.status!=='ready'||project.status!=='ready'||destination.operation_running)throw new HttpError(400,'Select a different Ready project in the same application and region.');
+        body.destinationEnvironment=destination.environment_name;
+      }
+      if(operation==='clone'){
+        if(body.confirmCosts!==true)throw new HttpError(400,'Confirm AWS charges for the new clone.');
+        if(running.size||zipReplacing)throw new HttpError(409,'Another cloud operation is running.');
+        if(launches>=5)throw new HttpError(429,'Worker launch limit reached.');
+        if(project.status!=='ready'||!/^[-a-z0-9]{3,40}$/.test(body.name??''))throw new HttpError(400,'Use a Ready source and a 3?40 character clone name.');
+        const {data:existing,error}=await admin.database.from('ebkit_web_projects').select('id').eq('user_id',user.id).eq('mode','live').neq('status','destroyed').limit(11);
+        if(error)throw new HttpError(503,'Could not check clone quota.');
+        if(!(config.evaluatorEmails??[]).includes(user.email?.toLowerCase())&&existing.length>=10)throw new HttpError(429,'Destroy an existing project before cloning.');
+        const id=randomUUID();
+        let clone={id,user_id:user.id,name:body.name,repository:project.repository,region:project.region,port:project.port,mode:'live',status:'deploying',stage:1,replicas:project.replicas,revision:1,variable_names:project.variable_names??[],application_name:project.application_name,environment_name:`ebk-${id.replaceAll('-','').slice(0,16)}-cluster`};
+        if(trials){clone=await trials.reserve(clone,user);if(clone.plan==='free_trial')clone.replicas=1;}
+        else{const result=await admin.database.from('ebkit_web_projects').insert([clone]).select('*');if(result.error||!result.data?.[0])throw new HttpError(503,'Could not save clone.');clone=result.data[0];}
+        const originalState=await readJSON(path.join(directoryRoot,`${project.id}.json`)).catch(()=>null);
+        if(originalState)await atomicJSON(path.join(directoryRoot,`${id}.json`),{deployments:(originalState.deployments??[]).filter(item=>item.environment_name===project.environment_name)});
+        body.sourceEnvironment=project.environment_name;
+        try{const result=await run('clone',clone,body);launches++;return reply(202,{...result,project:{...clone,operation_running:true,last_operation:'clone'}});}
+        catch(error){await save(clone.id,{status:'failed',trial_cleanup_state:'pending',trial_cleanup_next_at:new Date().toISOString()});throw error;}
+      }
       if (match[2] === 'deploy' && body.confirmCosts !== true) throw new HttpError(400, 'Confirm AWS charges for redeployment.');
       if (match[2] === 'deploy') {
         if (project.repository.startsWith('zip:')) {
@@ -330,14 +440,14 @@ export async function createWorker(config, dependencies = {}) {
             if(body.port!==item.record.port)throw new HttpError(400,'Port changed after ZIP preparation. Prepare and review the Dockerfile again.');
             const inspected=await readJSON(path.join(item.directory,'inspection.json'));
             const {inspectEnvironment}=await import('./environment.mjs');
-            const missing=requireEnvironment(inspectEnvironment(inspected.files),body.environment);
+            const missing=requireEnvironment(inspectEnvironment(inspected.files).filter(item=>!project.variable_names?.includes(item.name)),body.environment);
             if(missing.length)throw new HttpError(400,`Fill in required environment settings: ${missing.join(', ')}.`);
             body.sourceArchive=await uploads.archive(item);
             if(running.size)throw new HttpError(409,'Another cloud operation is running. Wait for it to finish.');
             item.record.projectId=project.id;
             await atomicJSON(path.join(item.directory,'record.json'),item.record);
             await atomicJSON(path.join(directoryRoot,`${project.id}.source.json`),{uploadId:body.uploadId,reviewHash:body.reviewHash});
-            const changes={repository:`zip:${item.record.name}`,port:item.record.port,variable_names:Object.keys(body.environment??{})};
+            const changes={repository:`zip:${item.record.name}`,port:item.record.port,variable_names:[...new Set([...(project.variable_names??[]),...Object.keys(body.environment??{})])]};
             await save(project.id,changes);Object.assign(project,changes);
           }else{
             const source=await readJSON(path.join(directoryRoot,`${project.id}.source.json`)).catch(()=>null);
@@ -355,8 +465,10 @@ export async function createWorker(config, dependencies = {}) {
   const checkTrials=async()=>{if(closing||!trials)return;const task=trials.tick();pollingTasks.add(task);try{await task;}catch{console.error('Trial cleanup scheduler could not reach the database; it will retry.');}finally{pollingTasks.delete(task);}};
   const trialTimer=trials?setInterval(()=>void checkTrials(),dependencies.trialInterval??30000):null;
   if(trials)await checkTrials();
+  const checkGithub=async()=>{if(closing||!githubDeploys)return;const task=githubDeploys.tick();pollingTasks.add(task);try{await task;}catch{console.error('GitHub auto-deploy watcher could not finish; it will retry.');}finally{pollingTasks.delete(task);}};
+  const githubTimer=githubDeploys?setInterval(()=>void checkGithub(),config.githubPollIntervalMs??300000):null;
   const stopWatching = () => {
-    clearInterval(trialTimer);
+    clearInterval(trialTimer);clearInterval(githubTimer);
     closing = true;
     for (const timer of monitors) clearInterval(timer); monitors.clear();
     void Promise.allSettled([...pollingTasks]).then(release);

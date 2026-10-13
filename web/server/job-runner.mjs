@@ -12,6 +12,7 @@ const redact = (text, secrets) => {
   return result.replace(/(?:AKIA|ASIA)[A-Z0-9]{16}/g, '[REDACTED AWS KEY]');
 };
 const secrets = input.secretFile ? (await readFile(input.secretFile, 'utf8')).split('\n').map(line => line.slice(line.indexOf('=') + 2, -1)).filter(Boolean) : [];
+if(input.optionsFile)secrets.push(...JSON.parse(await readFile(input.optionsFile,'utf8')).map(item=>item.Value));
 job.runnerPid = process.pid;
 job.state = 'running';
 job.heartbeat = Date.now();
@@ -24,19 +25,20 @@ const persist = () => {
   writes = writes.catch(() => {}).then(() => atomicJSON(file, snapshot));
   return writes;
 };
-const heartbeat = setInterval(() => { void persist().catch(() => { job.problem = 'Job progress could not be saved. Check AWS status before retrying.'; child?.kill(); }); }, 1000);
+const heartbeat = setInterval(() => { void persist().catch(error => { job.problem = `Job progress could not be saved (${error.code || 'filesystem error'}). Check AWS status before retrying.`; child?.kill(); }); }, 1000);
 const timeout = setTimeout(() => { job.problem = 'Operation timed out. Check AWS status before retrying.'; child?.kill(); }, Math.max(1, job.deadline - Date.now()));
 const finish = async code => {
   if (finished) return;
   finished = true;
   clearInterval(heartbeat); clearTimeout(timeout);
   job.state = 'finished'; job.code = job.problem ? 1 : code ?? 1;
+  if(input.optionsFile)await rm(input.optionsFile,{force:true}).catch(()=>{});
   if (input.secretFile) await rm(input.secretFile, { force: true }).catch(() => {});
   await persist();
 };
 try {
   const env = { ...process.env, ...input.env };
-  delete env.INSFORGE_API_KEY;
+  delete env.INSFORGE_API_KEY;delete env.EBKIT_GITHUB_TOKEN;
   delete env.GEMINI_API_KEY; delete env.GOOGLE_API_KEY;
   child = spawn(input.python, input.args, { cwd: input.cwd, env, shell: false, windowsHide: true, stdio: ['pipe','pipe','pipe'] });
   job.childPid = child.pid;

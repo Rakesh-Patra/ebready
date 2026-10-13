@@ -334,7 +334,7 @@ class TestDeploymentConfigValidation:
                 start_command="node index.js",
             )
         )
-        assert cfg.base_image() == "node:20-alpine"
+        assert cfg.base_image() == "node:20-trixie-slim"
 
     def test_runtime_version_invalid_string_rejected(self):
         with pytest.raises(ValidationError):
@@ -458,7 +458,7 @@ class TestGeneratedDockerfile:
             start_command="node index.js",
             port=3000,
         )
-        assert "node:20-alpine" in content
+        assert "node:20-trixie-slim" in content
         assert "EXPOSE 3000" in content
 
     def test_platform_annotation_present(self):

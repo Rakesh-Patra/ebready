@@ -36,8 +36,10 @@ def isolated_cli_config(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def isolate_settings(isolated_cli_config):
-    pass
+def isolate_settings(isolated_cli_config, monkeypatch):
+    # Recovery tests exercise repairs, not live generation/authentication.
+    from ebkit.generator.renderer import DeploymentKitRenderer
+    monkeypatch.setattr(DockerAIService, 'generate_dockerfile', lambda self,config,*args,**kwargs: (DeploymentKitRenderer().render(config).files['Dockerfile'], 'Generated test candidate'))
 
 
 @pytest.fixture
@@ -118,9 +120,9 @@ EXPOSE 8080
         """_ensure_cluster_mode_safety injects platform flag, non-root user, and matches port."""
         raw_df = "FROM python:3.12\nWORKDIR /app\nCMD [\"python\", \"app.py\"]\n"
         safe_df = DockerAIService._ensure_cluster_mode_safety(raw_df, sample_config)
-        assert "--platform=linux/amd64" in safe_df
-        assert "USER appuser" in safe_df
-        assert "EXPOSE 8080" in safe_df
+        assert safe_df == raw_df
+        from ebkit.validator.production import quality_report
+        assert not quality_report(safe_df, sample_config.port)['passed']
 
     def test_sanitize_secrets(self):
         """Secrets and passwords are masked before sending prompt to AI."""
@@ -156,7 +158,11 @@ class TestDockerAIRecoveryScenarios:
             "COPY requirements.txt .\n"
             "RUN pip install -r requirements.txt\n"
             "COPY . .\n"
-            "USER appuser\n"
+            "FROM python:3.12-slim AS runtime\n"
+            "WORKDIR /app\n"
+            "COPY --from=0 /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages\n"
+            "COPY --from=0 /app /app\n"
+            "USER 65532:65532\n"
             "EXPOSE 8080\n"
             "CMD [\"python\", \"-m\", \"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\"]\n"
         )
@@ -200,7 +206,11 @@ class TestDockerAIRecoveryScenarios:
             "COPY requirements.txt .\n"
             "RUN pip install -r requirements.txt\n"
             "COPY . .\n"
-            "USER appuser\n"
+            "FROM python:3.12-slim AS runtime\n"
+            "WORKDIR /app\n"
+            "COPY --from=0 /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages\n"
+            "COPY --from=0 /app /app\n"
+            "USER 65532:65532\n"
             "EXPOSE 8080\n"
             "CMD [\"python\", \"-m\", \"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\"]\n"
         )
@@ -243,7 +253,11 @@ class TestDockerAIRecoveryScenarios:
             "COPY requirements.txt .\n"
             "RUN pip install -r requirements.txt\n"
             "COPY . .\n"
-            "USER appuser\n"
+            "FROM python:3.12-slim AS runtime\n"
+            "WORKDIR /app\n"
+            "COPY --from=0 /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages\n"
+            "COPY --from=0 /app /app\n"
+            "USER 65532:65532\n"
             "EXPOSE 8080\n"
             "CMD [\"python\", \"-m\", \"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\"]\n"
         )
@@ -284,7 +298,11 @@ class TestDockerAIRecoveryScenarios:
             "COPY requirements.txt .\n"
             "RUN pip install --no-cache-dir -r requirements.txt\n"
             "COPY . .\n"
-            "USER appuser\n"
+            "FROM python:3.12-slim AS runtime\n"
+            "WORKDIR /app\n"
+            "COPY --from=0 /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages\n"
+            "COPY --from=0 /app /app\n"
+            "USER 65532:65532\n"
             "EXPOSE 8080\n"
             "CMD [\"python\", \"-m\", \"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\"]\n"
         )
@@ -325,7 +343,11 @@ class TestDockerAIRecoveryScenarios:
             "COPY requirements.txt .\n"
             "RUN pip install -r requirements.txt\n"
             "COPY . .\n"
-            "USER appuser\n"
+            "FROM python:3.12-slim AS runtime\n"
+            "WORKDIR /app\n"
+            "COPY --from=0 /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages\n"
+            "COPY --from=0 /app /app\n"
+            "USER 65532:65532\n"
             "EXPOSE 8080\n"
             "CMD [\"python\", \"-m\", \"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\"]\n"
         )
@@ -378,7 +400,11 @@ class TestDockerAIRecoveryScenarios:
             "COPY requirements.txt .\n"
             "RUN pip install -r requirements.txt\n"
             "COPY . .\n"
-            "USER appuser\n"
+            "FROM python:3.12-slim AS runtime\n"
+            "WORKDIR /app\n"
+            "COPY --from=0 /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages\n"
+            "COPY --from=0 /app /app\n"
+            "USER 65532:65532\n"
             "EXPOSE 8080\n"
             "CMD [\"python\", \"-m\", \"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\"]\n"
         )
@@ -439,7 +465,11 @@ class TestDockerAIConstraintsAndSecurity:
             "COPY requirements.txt .\n"
             "RUN pip install -r requirements.txt\n"
             "COPY . .\n"
-            "USER appuser\n"
+            "FROM python:3.12-slim AS runtime\n"
+            "WORKDIR /app\n"
+            "COPY --from=0 /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages\n"
+            "COPY --from=0 /app /app\n"
+            "USER 65532:65532\n"
             "EXPOSE 8080\n"
             "CMD [\"python\", \"-m\", \"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\"]\n"
         )
@@ -483,7 +513,11 @@ class TestDockerAIConstraintsAndSecurity:
             "COPY requirements.txt .\n"
             "RUN pip install -r requirements.txt\n"
             "COPY . .\n"
-            "USER appuser\n"
+            "FROM python:3.12-slim AS runtime\n"
+            "WORKDIR /app\n"
+            "COPY --from=0 /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages\n"
+            "COPY --from=0 /app /app\n"
+            "USER 65532:65532\n"
             "EXPOSE 8080\n"
             "CMD [\"python\", \"-m\", \"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\"]\n"
         )
@@ -515,7 +549,11 @@ class TestDockerAIConstraintsAndSecurity:
             "WORKDIR /app\n"
             "COPY .env /app/.env\n"  # Secret leak attempt
             "COPY . .\n"
-            "USER appuser\n"
+            "FROM python:3.12-slim AS runtime\n"
+            "WORKDIR /app\n"
+            "COPY --from=0 /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages\n"
+            "COPY --from=0 /app /app\n"
+            "USER 65532:65532\n"
             "EXPOSE 8080\n"
             "CMD [\"python\", \"-m\", \"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\"]\n"
         )
@@ -562,7 +600,11 @@ class TestDockerAIConstraintsAndSecurity:
             "COPY requirements.txt .\n"
             "RUN pip install -r requirements.txt\n"
             "COPY . .\n"
-            "USER appuser\n"
+            "FROM python:3.12-slim AS runtime\n"
+            "WORKDIR /app\n"
+            "COPY --from=0 /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages\n"
+            "COPY --from=0 /app /app\n"
+            "USER 65532:65532\n"
             "EXPOSE 8080\n"
             "CMD [\"python\", \"-m\", \"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\"]\n"
         )

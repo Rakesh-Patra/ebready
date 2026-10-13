@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
+import pytest
 from click.testing import CliRunner
 
 from ebkit.commands.operations import (
@@ -351,3 +352,15 @@ def test_destroy_cleans_failed_build_before_an_environment_exists(monkeypatch,tm
     eb.terminate_environment.assert_not_called();cleanup.assert_called_once()
     record=json.loads((tmp_path/'state.json').read_text())['deployments'][0]
     assert record['no_cluster_created'] is True and record['artifact_cleanup']=='Completed eligible cleanup'
+
+@pytest.mark.parametrize('state',['Launching','Updating','Terminating'])
+def test_destroy_busy_environment_is_pending_without_unsafe_deletion(monkeypatch,state):
+    eb=MagicMock();eb.describe_environments.return_value={'Environments':[_environment(Status=state)]}
+    session=MagicMock();session.client.return_value=eb
+    monkeypatch.setattr('ebkit.commands.operations._aws_session',lambda _:(session,'account'))
+    monkeypatch.setattr('ebkit.commands.operations._resolve_deployment',lambda *args:('demo','demo-cluster',{}))
+    cleanup=MagicMock();monkeypatch.setattr('ebkit.commands.operations.cleanup_application_artifacts',cleanup)
+    result=CliRunner().invoke(destroy_command,[],input='demo-cluster\n')
+    assert result.exit_code==2,result.output
+    assert 'Cleanup pending' in result.output and state in result.output
+    eb.terminate_environment.assert_not_called();cleanup.assert_not_called()

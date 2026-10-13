@@ -74,7 +74,7 @@ def _derive_config(scan) -> DeploymentConfig:
         if lang == "python":
             runtime_version = "3.12"
         elif lang == "node":
-            runtime_version = "20"
+            runtime_version = "24"
     framework = scan.framework
     health_path = "/" if framework == "django" else "/health"
     env_keys: list[str] = list(scan.detected_env_vars)
@@ -124,7 +124,7 @@ def valid_node_config() -> DeploymentConfig:
     return DeploymentConfig(
         language=Language.NODE,
         framework="express",
-        runtime_version="20",
+        runtime_version="24",
         package_manager=PackageManager.NPM,
         dependency_file="package.json",
         entrypoint="index.js",
@@ -149,12 +149,12 @@ class TestFastAPIArtifactMatrix:
         kit = DeploymentKitRenderer().render(valid_fastapi_config)
         df = kit.files["Dockerfile"]
 
-        assert "FROM --platform=linux/amd64 python:3.12-slim" in df
+        assert "FROM python:3.12-slim" in df
         assert "EXPOSE 8080" in df
-        assert "COPY requirements.txt ." in df
+        assert "COPY requirements.txt /tmp/requirements.txt" in df
         assert "pip install --no-cache-dir" in df
-        assert "USER appuser:appgroup" in df
-        assert '["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]' in df
+        assert "USER 65532:65532" in df
+        assert '["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]' in df
         assert ":latest" not in df
 
     def test_fastapi_dockerignore(self, valid_fastapi_config):
@@ -213,12 +213,12 @@ class TestNodeJSArtifactMatrix:
         kit = DeploymentKitRenderer().render(valid_node_config)
         df = kit.files["Dockerfile"]
 
-        assert "FROM --platform=linux/amd64 node:20-alpine" in df
+        assert "FROM node:24-trixie-slim" in df
         assert "EXPOSE 3000" in df
         assert "COPY package*.json ./" in df
-        assert "npm ci --only=production" in df
-        assert "USER node" in df
-        assert '["node", "index.js"]' in df
+        assert "npm prune --omit=dev" in df
+        assert "USER 65532:65532" in df
+        assert '["index.js"]' in df
 
     def test_node_dockerignore(self, valid_node_config):
         kit = DeploymentKitRenderer().render(valid_node_config)
@@ -428,9 +428,9 @@ class TestArtifactPlanning:
         kit = DeploymentKitRenderer().render(cfg)
         df = kit.files["Dockerfile"]
 
-        assert "AS builder" in df
-        assert "AS runner" in df
-        assert "golang:1.22-alpine" in df
+        assert "AS build" in df
+        assert "AS runtime" in df
+        assert "golang:1.22-trixie" in df
 
 
 # ===========================================================================

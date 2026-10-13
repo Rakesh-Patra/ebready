@@ -20,6 +20,7 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -95,7 +96,9 @@ class DeploymentKitRenderer:
         """
         plan = config.get_artifact_plan()
         kit = RenderedKit(config=config, plan=plan)
-        ctx = {"config": config, "plan": plan}
+        from ebkit.validator.production import requires_distroless
+        ctx = {"config": config, "plan": plan, "start_tokens": shlex.split(config.start_command),
+               "use_distroless": requires_distroless(config.language.value, config.runtime_version)}
 
         for name, req in plan.artifacts.items():
             if req.required or req.optional:

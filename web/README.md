@@ -58,6 +58,56 @@ The worker binds only to loopback. Do not expose the development Vite server pub
 
 ### ZIP preparation and review
 
+Generated Dockerfiles use reviewed distroless recipes for supported source metadata,
+or Gordon/Gemini with the shared Python production quality gate. Unsafe drafts and
+repairs are rejected before saving. The review screen shows the selected runtime
+and individual quality checks. Final non-root identity, build/runtime separation,
+exec-form startup, matching language/Debian ABI and lockfile/build inputs are checked;
+static success does not certify build, runtime or image CVEs. The worker never runs
+uploaded code. Download the reviewed source and use `ebkit doctor --production
+--require-distroless --pin-bases --verify --scout` locally for real image verification.
+
+### Generate and review a root Dockerfile from GitHub or ZIP
+
+Both source types use the same `/api/uploads/:id/prepare` generation and review
+path. For a ZIP, choose **New deployment → Upload ZIP**, upload the project, select
+**Detect project settings**, confirm the container port, approve AI analysis, then
+select **Prepare & review Dockerfile**. If the ZIP already has a root Dockerfile,
+it is shown for review; if it is missing, preparation tries reviewed recipes and
+Gordon, then Gemini when needed.
+
+For GitHub, choose **New deployment → GitHub link**, enter a public repository URL,
+and select **Prepare Dockerfile from GitHub snapshot**. The backend imports a
+commit-pinned copy of the public default branch. Confirm the detected port and
+approve AI analysis in the snapshot's preparation panel. A missing Dockerfile can
+be generated without changing the GitHub repository. Review the root Dockerfile
+and quality report; download the prepared archive or select **Use reviewed GitHub
+snapshot for deployment**. Snapshot deployments use ZIP source and future updates
+are manual. To deploy directly from GitHub later, download and commit the reviewed
+Dockerfile and any other reviewed changes yourself.
+
+For detected multi-tier projects, generation is explicitly prompted to create one
+Dockerfile at the repository root, use root-relative paths, build each required
+application tier, and keep stateful services (such as databases and caches)
+external. The user must still inspect and review the actual commands, asset paths,
+and startup behavior. Preparation performs static Dockerfile/build-input checks
+and the source dependency Scout gate; it does not build or run an image or scan
+image CVEs. Static acceptance is not proof that an arbitrary generated image builds
+or works. Download the prepared source and run local `ebkit doctor --production
+--verify --scout` to validate the image, HTTP behavior and image vulnerabilities.
+
+**Deployment doctor** appears after ZIP inspection and during Dockerfile review.
+Choose **Check deployment blockers** to see evidence with file/line locations and
+proposed diffs. Check **I reviewed the proposed diffs** before **Apply reviewed
+repairs**. The backend uses the same Python engine as `ebkit doctor`, checks upload
+ownership, rejects stale diffs, and changes only the uploaded copy. Repairs invalidate
+Dockerfile approval and Scout; prepare and review again before deployment. Missing
+build inputs and dependency conflicts remain manual repairs. No AWS resources are
+created and uploaded code is not executed. For Docker build/HTTP verification,
+download and extract the reviewed prepared ZIP and run
+`ebkit doctor --path ./your-project --port 8080 --verify` locally (use your port).
+Static findings are heuristic, and doctor does not replace the Scout security gate.
+
 Upload a ZIP up to 25 MB, then choose **Detect project settings**. Review the detected container port, correct it if needed, and check **I checked the container port** before preparing the Dockerfile. Detection is a suggestion; it does not change the application listening port. A single enclosing folder (including GitHub's downloaded ZIP layout) is flattened. Unsafe paths, links, duplicate paths, excessive compression, more than 5,000 entries or more than 200 MB expanded are rejected. `.env` files, common credential files and installed dependencies are omitted; keep secrets out of all source files yourself.
 
 The existing root Dockerfile is displayed. If missing, approve AI analysis and **Prepare & review Dockerfile** first uses the existing Docker AI (Gordon) integration. If Gordon is unavailable, fails or returns an invalid draft, Gemini uses the operator's server-side `GEMINI_API_KEY`. Only project scan metadata and selected manifests are supplied to generation; Gordon is instructed to return text without reading files, modifying files or running commands. The review screen identifies the provider. The key is never returned to the browser, put in a `VITE_` variable or passed to a deployment subprocess. Each approved account has five AI attempts per UTC day; missing/limited Gemini access produces a visible error and cannot enable deployment.
@@ -66,7 +116,7 @@ Review the full Dockerfile, then check **I reviewed this root Dockerfile**. Down
 
 The website also preserves an explicit Scout bypass: the user must acknowledge that security will NOT be verified, then run **Prepare with Scout bypass**. The warning remains visible during review and deployment configuration. A missing/failed scan never silently becomes a pass.
 
-ZIP builds use private encrypted S3 source storage and CodeBuild, with object-specific read permissions for the build role. Source objects are removed after the build; a one-day lifecycle rule covers abandoned sources. Destroy removes the verified application-owned source bucket and retained local ZIP source. Unclaimed uploads expire after 24 hours and are purged on a later upload. Claimed source is retained on private persistent disk for redeploy/recovery; redeploy builds the same reviewed uploaded snapshot. Choose **Upload ZIP & redeploy** on an existing ZIP project to prepare and review a replacement ZIP. It updates the same application/environment and keeps the URL; provide required environment values again. Redeploy without a replacement through the API reuses the existing snapshot. GitHub redeploy builds the repository latest code. Auto-deploy on GitHub push is planned and will apply only to GitHub projects; ZIP updates are manual.
+ZIP builds use private encrypted S3 source storage and CodeBuild, with object-specific read permissions for the build role. Source objects are removed after the build; a one-day lifecycle rule covers abandoned sources. Destroy removes the verified application-owned source bucket and retained local ZIP source. Unclaimed uploads expire after 24 hours and are purged on a later upload. Claimed source is retained on private persistent disk for redeploy/recovery; redeploy builds the same reviewed uploaded snapshot. Choose **Upload ZIP & redeploy** on an existing ZIP project to prepare and review a replacement ZIP. It updates the same application/environment and keeps the URL and previously supplied environment settings. Supply only new required settings or values you intend to change. Redeploy without a replacement through the API reuses the existing snapshot. GitHub redeploy builds the repository latest code. GitHub default-branch commits automatically trigger a new deployment while the worker is running. ZIP updates remain manual.
 
 For hosted CLI ZIP init, sign in on the website and use **Deploy with CLI → Copy CLI session token**. Configure `EBKIT_SERVICE_URL` to the website origin and `EBKIT_ACCESS_TOKEN` to that session token. Run `ebkit init --zip project.zip`; the service tries Gordon first, falls back to the operator Gemini key, prints the Dockerfile for confirmation and downloads the prepared source. Keep the token private; it expires with the account session. Hosted init runs source Scout by default and does not run local builds. `--no-scout` requires an explicit bypass and prints SECURITY NOT VERIFIED; it does not fix vulnerabilities.
 
@@ -90,7 +140,11 @@ If the runner and CLI were also stopped, recovery clears the stuck running flag 
 
 Use the same private persistent disk across restarts. Optionally set `EBKIT_JOBS_DIR` to its absolute path. Journals contain command metadata and redacted output; supplied secret values remain only in the temporary `.env`, which is removed on completion. A host shutdown removes the running processes; it cannot resume a CLI mid-command. Missing legacy job records are reported as interrupted. Startup fails closed if the database or job records cannot be checked.
 
-For a missing Dockerfile, run `ebkit init` locally, review the generated Dockerfile and Scout findings, then push it. The existing CLI Scout bypass and warning remain available. The web presence check does not run Scout.
+For direct GitHub deployment with a missing Dockerfile, either run `ebkit init`
+locally or use **Prepare Dockerfile from GitHub snapshot** in the web flow, then
+review and commit the file yourself. The web presence check does not run Scout;
+the snapshot preparation flow has its separate source dependency check described
+above. The existing CLI Scout bypass and warning remain available.
 
 ## Demo mode
 
@@ -137,3 +191,37 @@ The trial countdown starts once AWS reaches Ready/Green, lasts 30 minutes, and n
 The worker polls persistent database deadlines every 30 seconds, resumes overdue cleanup on startup, runs the owned `ebkit destroy`, retries failures with backoff, and verifies managed deletion using `ebkit cleanup-status --json`. Termination alone does not release a trial slot; the recorded eligible artifact cleanup and managed cluster stack deletion must both be verified. Missing state or IAM failures remain pending for operator review. Trial updates and scale-up are rejected server-side after expiry; reading status/logs and cleanup remain available.
 
 Keep the backend running as a supervised service and retain `EBKIT_JOBS_DIR` on persistent disk. Deadlines and reservations survive restarts; cleanup cannot execute while the host/worker is offline and catches up when it returns. Elastic Beanstalk's managed EKS deletion can outlast the trial, so a countdown is not a guarantee that AWS charges stop at expiry. This policy applies to hosted website deployments; CLI deployments into a user's own AWS account do not automatically get a trial timer.
+
+
+GitHub automatic deployment is enabled by default (`EBKIT_GITHUB_AUTO_DEPLOY=true`).
+The worker checks public repositories every 300 seconds (`EBKIT_GITHUB_POLL_SECONDS`, minimum 30),
+validates the root Dockerfile and newly required environment settings, and builds the detected
+commit SHA in CodeBuild. It uses the same application/environment, URL and existing settings.
+ZIP projects, expired trials, cleanup and destroyed projects are excluded. Busy operations
+finish before a later check deploys the newest commit. Attempted commits persist in
+`github-watch.json` under the private jobs directory, preventing duplicate builds after restart
+and retry loops after build failure. A new push or manual redeploy retries a failed deployment.
+Older deployments establish their baseline on their first watch check. GitHub outages or rate
+limits defer checking; no automatic deployment starts with an unverified commit. For continuous watching, configure an optional server-only `EBKIT_GITHUB_TOKEN` to raise API request limits. No webhook setup is needed.
+
+
+### Cloud controls
+
+Project Settings contains environment-variable updates, full option editing, health/events refresh,
+saved configuration templates, unused version deletion, clone creation and blue/green URL swaps.
+CLI follow/refresh commands run continuously; web monitoring requests a fresh snapshot every 30
+seconds while the monitoring panel is open. Values are sent through protected temporary files
+and redacted from output, including detached jobs recovered after a restart.
+
+Advanced writes require configured testing/evaluator access and exact source-environment confirmation.
+Clones create a separately tracked project in the same application, reserve capacity through the
+existing trial system, retain one-replica limits for free trials, and are cleaned up independently.
+Swaps accept an owned destination project ID; arbitrary environment names are never trusted.
+After a swap, cached URLs are cleared until Status retrieves the new AWS CNAMEs.
+Saved AWS configuration templates support Standard environments only; Cluster settings use options.
+
+Optional `EBKIT_AWS_PROFILES=development,operations` enables named profiles in Cloud controls.
+Set `EBKIT_AWS_ACCOUNT_ID` to the operator's 12-digit account ID too. Only these profile names are
+accepted, and CLI STS checks reject credentials for another account before environment operations.
+Profiles choose credentials for an action in the same account, not a different user's AWS account.
+No credentials are accepted from the browser or stored in project metadata.

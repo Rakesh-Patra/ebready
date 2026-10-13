@@ -120,15 +120,13 @@ def test_gemini_multitier_dockerfile_generation_uses_redacted_manifests(
                                 "COPY backend/ ./\n"
                                 "RUN go test ./... && mkdir -p /out && "
                                 "CGO_ENABLED=0 GOOS=linux go build -o /out/devboard .\n"
-                                "FROM alpine:3.21\n"
-                                "RUN apk add --no-cache ca-certificates && "
-                                "addgroup -S app && adduser -S -G app app\n"
+                                "FROM gcr.io/distroless/static-debian13:nonroot\n"
                                 "COPY --from=backend-build /out/devboard "
                                 "/usr/local/bin/devboard\n"
                                 "COPY --from=frontend-build /src/frontend/dist /app/frontend\n"
                                 "ENV FRONTEND_DIR=/app/frontend\n"
                                 "EXPOSE 4173\n"
-                                "USER app\n"
+                                "USER 65532:65532\n"
                                 'ENTRYPOINT ["/usr/local/bin/devboard"]\n'
                                 "```"
                             )
@@ -220,6 +218,108 @@ def test_multitier_build_metadata_supports_python_and_node_without_exporting_scr
     assert "devboard" not in context
 
 
+def test_gordon_revises_multitier_dockerfile_using_build_validation_feedback(tmp_path: Path):
+    project = tmp_path / "project"
+    frontend = project / "frontend"
+    backend = project / "backend"
+    frontend.mkdir(parents=True)
+    backend.mkdir()
+    (project / "docker-compose.yml").write_text(
+        "services:\n  frontend:\n    build: ./frontend\n"
+        "  backend:\n    build: ./backend\n"
+        "  redis:\n    image: redis:7\n",
+        encoding="utf-8",
+    )
+    package = {
+        "name": "frontend",
+        "version": "1.0.0",
+        "scripts": {"build": "node build.js"},
+    }
+    lock = {
+        "name": "frontend",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "requires": True,
+        "packages": {"": {"name": "frontend", "version": "1.0.0"}},
+    }
+    (frontend / "package.json").write_text(json.dumps(package), encoding="utf-8")
+    (frontend / "package-lock.json").write_text(json.dumps(lock), encoding="utf-8")
+    (frontend / "build.js").write_text(
+        "const fs=require('node:fs');fs.mkdirSync('dist',{recursive:true});"
+        "fs.writeFileSync('dist/index.html','healthy');\n",
+        encoding="utf-8",
+    )
+    (backend / "package.json").write_text(
+        json.dumps({**package, "name": "backend", "scripts": {"start": "node server.js"}}),
+        encoding="utf-8",
+    )
+    (backend / "package-lock.json").write_text(
+        json.dumps({**lock, "name": "backend", "packages": {"": {"name": "backend", "version": "1.0.0"}}}),
+        encoding="utf-8",
+    )
+    (backend / "server.js").write_text(
+        "require('node:http').createServer((req,res)=>res.end('healthy'))"
+        ".listen(8080,'0.0.0.0');\n",
+        encoding="utf-8",
+    )
+    scan = ProjectScanner(project).scan()
+    assert scan.architecture == "MULTI_TIER"
+    config = DeploymentConfig(
+        language="node",
+        runtime_version="22",
+        package_manager="npm",
+        dependency_file="backend/package.json",
+        entrypoint="backend/server.js",
+        start_command="node backend/server.js",
+        port=8080,
+    )
+    invalid = (
+        "FROM node:22-trixie AS frontend-build\n"
+        "WORKDIR /src/frontend\n"
+        "COPY frontend/package.json ./\n"
+        "RUN npm ci\n"
+        "COPY frontend/ ./\n"
+        "RUN npm run build\n"
+        "FROM node:22-trixie AS backend-build\n"
+        "WORKDIR /src/backend\n"
+        "COPY backend/package.json backend/package-lock.json ./\n"
+        "RUN npm ci\n"
+        "COPY backend/ ./\n"
+        "FROM gcr.io/distroless/nodejs22-debian13:nonroot\n"
+        "WORKDIR /app\n"
+        "COPY --from=backend-build /src/backend/server.js /app/server.js\n"
+        "COPY --from=frontend-build /src/frontend/dist /app/frontend\n"
+        "USER 65532:65532\n"
+        "EXPOSE 8080\n"
+        'ENTRYPOINT ["/nodejs/bin/node"]\n'
+        'CMD ["server.js"]\n'
+    )
+    valid = invalid.replace(
+        "COPY frontend/package.json ./\n",
+        "COPY frontend/package.json frontend/package-lock.json ./\n",
+    )
+    prompts = []
+
+    def fake_gordon(prompt, working_dir=None, timeout=60):
+        prompts.append(prompt)
+        assert working_dir == project
+        return f"```dockerfile\n{invalid if len(prompts) == 1 else valid}```"
+
+    with patch.object(DockerAIService, "is_available", return_value=True):
+        with patch.object(DockerAIService, "ask_gordon", side_effect=fake_gordon):
+            dockerfile, message = DockerAIService().generate_dockerfile(
+                config, scan=scan, working_dir=project
+            )
+
+    assert dockerfile == valid
+    assert "Docker AI (Gordon)" in message
+    assert len(prompts) == 2
+    assert "at the repository root" in prompts[0]
+    assert "Never run npm ci unless package-lock.json" in prompts[0]
+    assert "npm ci requires an existing package-lock.json" in prompts[1]
+    assert "Detected service build metadata" in prompts[0]
+
+
 @pytest.mark.parametrize(
     ("manifest_copy", "source_copy"),
     [
@@ -296,7 +396,7 @@ def test_integrated_go_frontend_dockerfile_guard_accepts_copy_syntax_variants(
         f"{asset_copy}\n"
         f"{frontend_env}\n"
         f"EXPOSE {config.port}\n"
-        "USER app\n"
+        "USER 65532:65532\n"
         'ENTRYPOINT ["/usr/local/bin/devboard"]\n'
     )
 
@@ -344,7 +444,7 @@ def test_integrated_go_frontend_dockerfile_guard_requires_source_before_build(
         "COPY --from=frontend-build /src/frontend/dist /app/frontend\n"
         "ENV FRONTEND_DIR=/app/frontend\n"
         f"EXPOSE {config.port}\n"
-        "USER app\n"
+        "USER 65532:65532\n"
         'ENTRYPOINT ["/usr/local/bin/devboard"]\n'
     )
 
@@ -397,7 +497,7 @@ def test_multitier_dockerfile_validation_rejects_missing_start_command():
         "FROM alpine:3.21\n"
         "COPY app /app\n"
         "EXPOSE 8080\n"
-        "USER app\n"
+        "USER 65532:65532\n"
     )
 
     error = DockerAIService._multitier_dockerfile_error(dockerfile, config)
@@ -434,7 +534,7 @@ def test_integrated_go_frontend_dockerfile_guard_rejects_incomplete_ai_output(
         "FROM nginx:stable-alpine\n"
         "COPY --from=backend /out/devboard /usr/local/bin/devboard\n"
         "EXPOSE 8080\n"
-        "USER app\n"
+        "USER 65532:65532\n"
         'ENTRYPOINT ["/usr/local/bin/devboard"]\n'
     )
 

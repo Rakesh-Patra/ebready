@@ -17,7 +17,7 @@ import click
 from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 
 from ebkit.config import load_config
-from ebkit.deployment_state import save_deployment
+from ebkit.deployment_state import save_deployment, load_deployments
 from ebkit.repo_handler import validate_github_url
 
 _COMMON_REGIONS = [
@@ -87,6 +87,8 @@ def _table(rows: List[Dict], columns: List[str]) -> None:
 def _check_aws_credentials() -> Tuple[bool, Optional[str], Optional[str]]:
     try:
         identity = boto3.Session().client("sts").get_caller_identity()
+        expected=os.environ.get("EBKIT_EXPECTED_AWS_ACCOUNT")
+        if expected and identity.get("Account")!=expected:return False,None,"AWS profile account does not match this worker account."
         return True, identity.get("Account"), identity.get("Arn")
     except Exception as exc:
         return False, None, str(exc)
@@ -353,6 +355,8 @@ def _build_image_in_aws(
     repo_url: str,
     image_uri: str,
     zip_source: Optional[Dict] = None,
+    commit: Optional[str] = None,
+    release_policy: Optional[Dict] = None,
 ) -> Dict[str, str]:
     parsed = urlsplit(repo_url)
     github_location = f"https://github.com{parsed.path.rstrip('/').removesuffix('.git')}.git"
@@ -394,6 +398,7 @@ def _build_image_in_aws(
             ] + source_permissions,
         }),
     )
+    from ebkit.release import buildspec
     project_args = {
         "name": project_name,
         "description": f"Build public GitHub source for {app_name}",
@@ -401,18 +406,7 @@ def _build_image_in_aws(
             "type": "GITHUB",
             "location": github_location,
             "gitCloneDepth": 1,
-            "buildspec": (
-                "version: 0.2\n"
-                "phases:\n"
-                "  pre_build:\n"
-                "    commands:\n"
-                "      - aws ecr get-login-password --region \"$AWS_DEFAULT_REGION\" "
-                "| docker login --username AWS --password-stdin \"$EBKIT_ECR_REGISTRY\"\n"
-                "  build:\n"
-                "    commands:\n"
-                "      - docker build --platform linux/amd64 -t \"$EBKIT_IMAGE_URI\" .\n"
-                "      - docker push \"$EBKIT_IMAGE_URI\"\n"
-            ),
+            "buildspec": buildspec(release_policy),
         },
         "artifacts": {"type": "NO_ARTIFACTS"},
         "environment": {
@@ -441,6 +435,7 @@ def _build_image_in_aws(
     result = _codebuild_role_call(
         codebuild_client, "start_build",
         projectName=project_name,
+        **({"sourceVersion": commit} if commit else {}),
         environmentVariablesOverride=[
             {
                 "name": "EBKIT_ECR_REGISTRY",
@@ -533,6 +528,7 @@ def _ensure_cluster_environment(
     env_vars: Dict[str, str],
     port: int,
     max_replicas: Optional[int] = None,
+    require_existing: bool = False,
 ) -> bool:
     environments = eb_client.describe_environments(
         ApplicationName=app_name, EnvironmentNames=[env_name], IncludeDeleted=False
@@ -540,6 +536,8 @@ def _ensure_cluster_environment(
     if environments:
         _info(f"Updating existing environment '{env_name}'.")
         return False
+    if require_existing:
+        raise RuntimeError("Watched environment disappeared; it will not be recreated.")
     eb_client.create_environment(
         ApplicationName=app_name,
         EnvironmentName=env_name,
@@ -632,21 +630,40 @@ def _execute_deploy(
     app: Optional[str],
     env: Optional[str],
     region: Optional[str],
-    port: int,
+    port: Optional[int],
     wait: bool,
     env_file: Optional[str],
     extra_env: Tuple[str, ...],
     is_interactive: bool,
     archive_path: Optional[str] = None,
     max_replicas: Optional[int] = None,
+    commit: Optional[str] = None,
+    require_existing: bool = False,
+    release_policy: Optional[Dict] = None,
 ) -> Dict:
+    if release_policy:
+        from ebkit.release import validate_policy
+        release_policy=validate_policy(release_policy)
+        if not wait:raise click.ClickException("Release verification requires --wait.")
+    if commit and (archive_path or not re.fullmatch(r"[0-9a-fA-F]{40}", commit)):
+        raise click.ClickException("--commit requires a full GitHub commit SHA and cannot be used with ZIPs.")
     config = load_config()
     parsed = urlsplit(source_url)
     repo_name = parsed.path.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
-    if not app:
-        app = repo_name.lower().replace("_", "-")
-    if not env:
-        env = f"{app}-cluster"
+    authenticated, account_id, error = _check_aws_credentials()
+    if not authenticated or not account_id:
+        raise click.ClickException(f"AWS authentication required: {error}")
+    records = load_deployments()
+    canonical = lambda value: value.rstrip("/").removesuffix(".git").lower()
+    if not region:
+        saved_targets = [item for item in records if item.get("account_id") == account_id
+                         and (not app or item.get("application_name") == app)
+                         and (not env or item.get("environment_name") == env)
+                         and (app or env or canonical(item.get("source_url", "")) == canonical(source_url))]
+        if len(saved_targets) > 1:
+            raise click.ClickException("Multiple saved targets match. Specify --region, --app and --environment.")
+        if saved_targets:
+            region = saved_targets[0].get("region")
     if not region:
         saved_region = getattr(config, "aws_region", None) or os.environ.get(
             "AWS_DEFAULT_REGION"
@@ -657,16 +674,28 @@ def _execute_deploy(
             else saved_region or "us-east-2"
         )
 
-    authenticated, account_id, error = _check_aws_credentials()
-    if not authenticated or not account_id:
-        raise click.ClickException(f"AWS authentication required: {error}")
+
+    # Match only this account and region. Explicit targets also support renamed ZIPs.
+    canonical = lambda value: value.rstrip("/").removesuffix(".git").lower()
+    matches = [item for item in records
+               if item.get("account_id") == account_id and item.get("region") == region
+               and (not app or item.get("application_name") == app)
+               and (not env or item.get("environment_name") == env)
+               and (app or env or canonical(item.get("source_url", "")) == canonical(source_url))]
+    if len(matches) > 1:
+        raise click.ClickException("Multiple saved targets match. Specify --app and --environment to select the deployment.")
+    previous = matches[0] if matches else {}
+    app = app or previous.get("application_name") or repo_name.lower().replace("_", "-")
+    env = env or previous.get("environment_name") or f"{app}-cluster"
+    port = port if port is not None else previous.get("port", 8080)
 
     env_vars = _collect_env_vars(env_file, extra_env, is_interactive)
     image_uri = (
-        f"{account_id}.dkr.ecr.{region}.amazonaws.com/{app}:v{int(time.time())}"
+        f"{account_id}.dkr.ecr.{region}.amazonaws.com/{app}:v{time.time_ns()}"
     )
     codebuild_project, _ = _codebuild_names(app, source_url)
     deployment = {
+        **previous,
         "account_id": account_id,
         "region": region,
         "application_name": app,
@@ -674,9 +703,12 @@ def _execute_deploy(
         "source_url": source_url,
         "port": port,
         "image_uri": image_uri,
+        "source_commit": commit,
         "codebuild_project": codebuild_project,
         "status": "BUILDING",
     }
+    if not require_existing:
+        deployment.pop("watch_commit", None)
     if is_interactive:
         _table(
             [
@@ -703,6 +735,10 @@ def _execute_deploy(
         _persist_deployment(deployment)
     ecr = session.client("ecr")
     eb = session.client("elasticbeanstalk")
+    previous_version=None
+    if release_policy:
+        live=eb.describe_environments(ApplicationName=app,EnvironmentNames=[env],IncludeDeleted=False).get("Environments",[])
+        if live:previous_version=live[0].get("VersionLabel")
     _ensure_ecr_repo(ecr, app)
     try:
       build_info = _build_image_in_aws(
@@ -715,6 +751,8 @@ def _execute_deploy(
         repo_url=source_url,
         image_uri=image_uri,
         **({'zip_source':zip_source} if zip_source else {}),
+        **({'commit':commit} if commit else {}),
+        **({'release_policy':release_policy} if release_policy else {}),
     )
     finally:
         if zip_source:
@@ -736,7 +774,8 @@ def _execute_deploy(
     deployment["status"] = "DEPLOYING"
     _persist_deployment(deployment)
     created = _ensure_cluster_environment(
-        eb, app, env, version_label, infra, env_vars, port, max_replicas
+        eb, app, env, version_label, infra, env_vars, port, max_replicas,
+        **({"require_existing": True} if require_existing else {}),
     )
     if not created:
         eb.update_environment(
@@ -749,12 +788,17 @@ def _execute_deploy(
     result = (
         _poll_environment_health(eb, app, env)
         if wait
-        else {"status": "Deploying", "health": "Pending", "url": None}
+        else {"status": "Deploying", "health": "Pending", "url": previous.get("url")}
     )
+    if release_policy:
+        from ebkit.release import verify_or_recover
+        result.update(verify_or_recover(eb,app,env,version_label,previous_version,release_policy,_poll_environment_health))
     deployment.update(result)
     deployment["status"] = result["status"]
     deployment["health"] = result["health"]
     _persist_deployment(deployment)
+    if release_policy and result.get("release_verification")!="passed":
+        raise RuntimeError(f"Release verification failed; recovery: {result.get('recovery','unknown')}. Database migrations were not rolled back.")
     if wait and result["status"] != "Ready":
         raise RuntimeError(
             f"Elastic Beanstalk environment '{env}' did not become ready "
@@ -777,16 +821,24 @@ def _execute_deploy(
 @click.option("--app", help="Elastic Beanstalk application name (defaults to repository name)")
 @click.option("--environment", "--env-name", "environment_name", help="Elastic Beanstalk environment name")
 @click.option("--region", help="AWS region (for example, us-east-2)")
-@click.option("--port", default=8080, show_default=True, type=click.IntRange(1, 65535), help="Port the container listens on")
+@click.option("--port", default=None, type=click.IntRange(1, 65535), help="Container port (existing saved port, otherwise 8080)")
+@click.option("--release-policy", type=click.Path(exists=True,dir_okay=False), help="Reviewed JSON test commands, HTTP checks and automatic recovery policy.")
+@click.option("--commit", help="Build this full GitHub commit SHA instead of the branch head.")
 @click.option("--max-replicas", type=click.IntRange(1,100), help="Set autoscaling maximum (new environments default to 5; updates preserve bounds unless set).")
 @click.option("--wait/--no-wait", default=True, help="Wait for the environment to become ready")
 @click.option("--env-file", help="Local file containing application environment variables")
 @click.option("--env", "extra_env", multiple=True, metavar="KEY=VALUE", help="Application environment variable")
 @click.option("-y", "--yes", is_flag=True, help="Skip the deployment confirmation")
 @click.option('--reviewed', is_flag=True, help='Confirm that you reviewed the root Dockerfile in this ZIP.')
-def deploy(source, app, environment_name, region, port, wait, env_file, extra_env, yes, reviewed=False, max_replicas=None):
+def deploy(source, app, environment_name, region, port, wait, env_file, extra_env, yes, reviewed=False, max_replicas=None, commit=None, release_policy=None):
     """Deploy a GitHub URL or a reviewed local project ZIP using AWS CodeBuild."""
     source = source.strip()
+    if release_policy:
+        from ebkit.release import read_policy
+        try:release_policy=read_policy(release_policy)
+        except (ValueError,OSError) as error:raise click.ClickException(str(error)) from None
+    if commit and (source.lower().endswith(".zip") or not re.fullmatch(r"[0-9a-fA-F]{40}", commit)):
+        raise click.ClickException("--commit requires a full GitHub commit SHA and cannot be used with ZIPs.")
     if Path(source).is_file() and source.lower().endswith('.zip'):
         from ebkit.source_bundle import extract_zip, make_zip
         import zipfile
@@ -803,7 +855,7 @@ def deploy(source, app, environment_name, region, port, wait, env_file, extra_en
                     if not click.confirm('I reviewed this Dockerfile. Continue?',default=False): raise click.Abort()
                 prepared = make_zip(root,Path(directory)/'source.zip')
                 archive_name = re.sub(r'[^a-z0-9-]', '-', Path(source).stem.lower()).strip('-') or 'zip-app'
-                _execute_deploy(source_url=f'zip://source/{archive_name}',app=app,env=environment_name,region=region,port=port,wait=wait,env_file=env_file,extra_env=extra_env,is_interactive=not yes and sys.stdin.isatty(),archive_path=str(prepared),**({'max_replicas':max_replicas} if max_replicas is not None else {}))
+                _execute_deploy(source_url=f'zip://source/{archive_name}',app=app,env=environment_name,region=region,port=port,wait=wait,env_file=env_file,extra_env=extra_env,is_interactive=not yes and sys.stdin.isatty(),archive_path=str(prepared),**({'release_policy':release_policy} if release_policy else {}),**({'max_replicas':max_replicas} if max_replicas is not None else {}))
                 return
         except (ValueError, OSError, zipfile.BadZipFile, BotoCoreError, ClientError, RuntimeError, TimeoutError) as error:
             raise click.ClickException(str(error)) from None
@@ -815,6 +867,8 @@ def deploy(source, app, environment_name, region, port, wait, env_file, extra_en
     try:
         _execute_deploy(
             source_url=source,
+            **({"release_policy":release_policy} if release_policy else {}),
+            **({"commit":commit} if commit else {}),
             app=app,
             env=environment_name,
             region=region,

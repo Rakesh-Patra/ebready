@@ -37,7 +37,7 @@ def hosted_init(archive: str, output: str | None, service_url: str, port: int | 
             raise click.ClickException('Project preparation timed out. Try again later.') from None
     uploaded=request('/api/uploads',file.read_bytes(),'application/zip')
     prepared=request(f"/api/uploads/{uploaded['uploadId']}/prepare", {'port':port,'allowAI':True,'skipScout':skip_scout,'acknowledgeScoutBypass':skip_scout})
-    provider={'gordon':'Docker AI (Gordon)','gemini':'Gemini','existing':'Existing Dockerfile'}.get(prepared.get('generator'),'AI')
+    provider={'gordon':'Docker AI (Gordon)','gemini':'Gemini','recipe':'EBKit reviewed distroless recipe','existing':'Existing Dockerfile'}.get(prepared.get('generator'),'AI')
     click.echo(f'\nDockerfile provider: {provider}\nReview the root Dockerfile:\n\n'+prepared['dockerfile'])
     click.echo('AI output is a draft; image build and runtime checks have not run.')
     scout=prepared.get('scout') or {}

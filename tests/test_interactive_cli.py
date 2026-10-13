@@ -186,6 +186,9 @@ class TestInteractiveCLI:
                 "COPY requirements.txt ./\n"
                 "RUN pip install --no-cache-dir -r requirements.txt\n"
                 "COPY . .\n"
+                "FROM python:3.12-slim AS runtime\n"
+                "WORKDIR /app\n"
+                "COPY --from=0 /app /app\n"
                 f"EXPOSE {config.port}\n"
                 "USER nobody\n"
                 f'CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "{config.port}"]\n',
@@ -556,7 +559,7 @@ class TestSecurity:
         runner = CliRunner()
         with patch.object(GoogleAIAnalyzer, "analyze", return_value=dummy_config):
             with patch.object(GoogleAIAnalyzer, "__init__", return_value=None):
-                result = runner.invoke(init_command, ["--no-build"], input="1\n1\n")
+                result = runner.invoke(init_command, ["--path", str(sample_project), "--analyzer", "gemini", "--yes", "--no-build", "--no-scout"])
                 assert secret_key not in result.output
 
     def test_api_keys_never_stored_in_config(self, tmp_path: Path):
@@ -590,7 +593,7 @@ class TestSecurity:
         runner = CliRunner()
         with patch.object(GoogleAIAnalyzer, "__init__", return_value=None):
             with patch.object(GoogleAIAnalyzer, "analyze", return_value=dummy_config):
-                result = runner.invoke(init_command, ["--no-build"], input="1\n1\n")
+                result = runner.invoke(init_command, ["--path", str(sample_project), "--analyzer", "gemini", "--yes", "--no-build", "--no-scout"])
                 assert "AWS Secret" not in result.output
                 assert "Access Key" not in result.output
                 assert "Security Token" not in result.output

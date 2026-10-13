@@ -1,5 +1,21 @@
 # EBKit
 
+EBKit generates and checks Docker deployment kits and manages AWS Elastic Beanstalk deployments from the CLI and web.
+
+- Production Dockerfile recipes, distroless runtimes where supported, build/runtime checks and image CVE gates.
+- GitHub and reviewed ZIP deployments; GitHub automatic updates every five minutes.
+- Same-environment redeployment, version history, rollback, cloning and blue/green URL swaps.
+- Health/events, configuration controls and named AWS profiles.
+- External PostgreSQL lifecycle, SQL migrations, CloudWatch history/alarms, guided autoscaling, verified releases, GitHub OIDC pipeline generation and scoped billing/budget tools.
+
+**Documentation:** [CLI guide](docs/CLI.md) ? [Web guide](web/README.md) ? [Production operations and live test checklist](docs/OPERATIONS.md) ? [Initialization](docs/initialization.md)
+
+Automated tests cover local behavior and mocked AWS integrations. Live AWS integration tests are still required. AWS resources incur charges; external databases and snapshots persist independently of environment teardown. Cost reports explicitly identify attribution limits.
+
+---
+
+# EBKit
+
 EBKit is a command-line tool for preparing applications and deploying a **public GitHub repository or reviewed project ZIP** to **AWS Elastic Beanstalk Cluster Mode**. The deployment flow is intentionally simple: give EBKit a GitHub URL and the container port; AWS CodeBuild builds the repository's root-level `Dockerfile`, pushes the image to ECR, and Elastic Beanstalk deploys it.
 
 EBKit runs on your computer and deploys to **your AWS account**. It is not a hosted deployment service. AWS resources may incur charges.
@@ -14,6 +30,7 @@ You will need:
 - **AWS CLI v2**, installed and configured for your AWS account
 - An AWS account with permission to use Elastic Beanstalk Cluster Mode, CodeBuild, ECR, IAM, EC2/VPC, and related services
 - A **public GitHub repository or local project ZIP** with a `Dockerfile` at its root
+  (create and review one first with `ebkit init` or the website's ZIP/GitHub snapshot preparation flow)
 - The application listening on `0.0.0.0` and the port you will pass to EBKit
 - A **Gemini API key** for local AI init, or an approved EBKit website session for hosted ZIP init using the operator key
 
@@ -86,6 +103,99 @@ For interactive workflows, omit `--yes`; it skips confirmation prompts and shoul
 only be used when you intentionally want non-interactive execution.
 
 ## Command reference
+
+Generated Dockerfiles now pass a shared production quality gate in the CLI and
+website. Supported apps use reviewed distroless recipes; Gordon/Gemini drafts must
+pass the same checks before saving. The gate checks final-stage non-root users,
+multi-stage builds, exec-form startup, matching runtimes, safe copy/install inputs
+and ports. Runtime and CVE health are measured separately. See the
+[production generation and verification guide](docs/initialization.md).
+
+```powershell
+ebkit doctor --path . --port 8080 --production --require-distroless --pin-bases --verify --scout
+```
+
+This reviews real registry digest pins, builds/probes the image, and enforces zero
+Critical/High image CVEs with Docker Scout. A failed/unavailable scan is never a pass.
+
+- **`ebkit doctor --path . --port 8080`** — Explain deployment blockers without
+  executing code or contacting AWS/AI. `--fix` shows diffs and asks before applying
+  targeted startup-binding, Dockerfile EXPOSE, and incompatible Node runtime repairs.
+  Missing Dockerfiles/build inputs and dependency conflicts require manual review.
+  Add `--verify` to approve a local Docker build and HTTP probe; the temporary
+  container and image are cleaned up afterward. Build/runtime remain **not verified**
+  unless those checks actually run. Security is separate: use init/Scout.
+  `--json` emits the report; `--yes` explicitly approves repairs/local execution.
+  Exit codes: 0 = checked without outstanding findings, 1 = findings/check failure,
+  2 = requested Docker verification was not completed. Static checks are heuristic.
+
+```powershell
+ebkit doctor --path . --port 8080
+ebkit doctor --path . --port 8080 --fix --verify
+ebkit doctor https://github.com/OWNER/REPOSITORY --output ./reviewed-project --port 8080 --fix --verify
+```
+
+The website offers **Deployment doctor** after ZIP inspection and on Dockerfile
+review. Review proposed diffs, then apply repairs to the uploaded copy. Preparation,
+Dockerfile approval and Scout must be repeated after repairs. Web doctor performs
+static analysis only; download/extract the reviewed prepared ZIP and run CLI
+`doctor --verify` for local build/runtime verification.
+
+GitHub doctor downloads the public default branch at an identified commit into an
+empty `--output` directory, with the same bounded ZIP extraction as uploads.
+Repairs change that retained snapshot; push reviewed files yourself to deploy from
+GitHub, or use the reviewed prepared ZIP. On the website, choose **Check GitHub
+with Deployment doctor**, review/apply diffs, prepare and review the Dockerfile,
+then download the ZIP or **Use reviewed GitHub snapshot for deployment**.
+Snapshot deployment follows the ZIP security gate and manual update workflow.
+
+### Generate a production Dockerfile in the website
+
+The web preparation flow accepts either a project ZIP or a public GitHub URL.
+For ZIPs, start **New deployment → Upload ZIP**, upload the archive, inspect and
+confirm its port, approve AI metadata analysis, then select **Prepare & review
+Dockerfile**. For GitHub, choose **New deployment → GitHub link**, enter the public
+URL, then select **Prepare Dockerfile from GitHub snapshot**. That imports an
+immutable copy of the public default branch; confirm the detected port, approve AI
+analysis, and prepare/review the Dockerfile on that copy. The repository on GitHub
+is never modified. You can deploy the reviewed snapshot as ZIP source, or download
+and commit the reviewed Dockerfile before deploying directly from GitHub.
+
+For detected multi-tier applications the generator is instructed to produce one
+repository-root Dockerfile, build application tiers from root-relative paths, and
+keep stateful services such as databases and caches external. Inspect the generated
+Dockerfile and quality report, then review the complete source before deployment.
+The web flow runs static Dockerfile/build-input checks and a source dependency Scout
+gate; it does **not** build or start the image or scan image CVEs. Use the local
+`ebkit doctor --production --verify --scout` workflow above for those checks.
+
+### New: pre-deployment Deployment doctor
+
+`ebkit doctor` adds a local, source-aware check before deployment. It looks for
+common Dockerfile and application deployment blockers, shows targeted repair diffs
+before applying them, and can optionally build and run the container locally for
+an HTTP health probe. Production checks, registry-resolved base-image pins, and an
+optional Docker Scout image scan extend that workflow. It can also review a public
+GitHub repository by downloading a commit-pinned snapshot into an empty local
+directory. Static findings are heuristic; only checks that actually run are reported
+as verified.
+
+### How this differs from AWS EB CLI
+
+AWS's `eb` CLI is a general-purpose client for creating, deploying, and managing
+Elastic Beanstalk applications and environments. EBKit's `doctor` complements that
+kind of deployment workflow rather than replacing it: it reviews your project and
+Docker setup before deployment, and its optional build/HTTP checks run locally.
+Doctor does not provision or change AWS resources and does not require AWS or AI
+credentials. By contrast, `ebkit diagnose` investigates an existing deployment
+using AWS build logs and Elastic Beanstalk events; optional Gemini advice is a
+separate, explicitly requested step.
+
+EBKit's deployment command is also opinionated around Elastic Beanstalk Cluster
+Mode: AWS CodeBuild builds the root Dockerfile, pushes the image to ECR, and EBKit
+creates or updates the environment. Use AWS EB CLI when you need its broader
+Elastic Beanstalk command workflow; use EBKit when you want this Docker-focused
+preflight and its integrated Cluster Mode deployment path.
 
 - **`ebkit init`** — Generate the root Dockerfile and deployment files, validate
   them, and scan source dependencies with Docker Scout. Interactive init asks before
@@ -176,6 +286,8 @@ EBKit performs the deployment without a local Docker build:
 The first deployment may create IAM roles, a CodeBuild project, an ECR repository, and Elastic Beanstalk resources. These are created in your AWS account using your credentials. You do not need to create a CodeBuild project, ECR repository, or EKS cluster manually. Private GitHub repositories are not supported by this flow.
 
 The source must have a Dockerfile at its root. Uploaded ZIPs may contain one enclosing project folder; EBKit safely flattens it before building.
+
+ZIP preparation and CLI init check missing Dockerfile build inputs and known Vite/Node/React-plugin incompatibilities before deployment. Invalid Gordon drafts fall back to Gemini during website preparation; invalid fallback drafts are blocked. These are static checks, not a successful image-build guarantee. Dependencies are never silently changed, and Scout remains a separate security check.
 
 ### AWS IAM permissions and roles
 
@@ -378,6 +490,46 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and pull 
 
 ### Website trial access
 
-Hosted website deployments offer one operator-approved 30-minute free trial per account, one replica, a persistent countdown and automatic cleanup. The timer starts at Ready/Green and is not extended by redeployment. Provisioning is limited to 30 minutes. Global deployment slots default to two, including trials awaiting verified cleanup. The **Rs49 two-hour pass is Coming soon**; no payment checkout is enabled. See `web/README.md` for scheduler operation and cleanup limitations. Local CLI deployments in your own AWS account are not time-limited by this website trial policy.
+Hosted website deployments offer one operator-approved 30-minute free trial per account, one replica, a persistent countdown and automatic cleanup. Ordinary free accounts can redeploy updated code to the same active trial environment; rollback remains unavailable. The timer starts at Ready/Green. Operator-designated testing accounts may repeat deployments within their configured limits, but updates never extend the deadline. Provisioning is limited to 30 minutes. Global deployment slots default to two, including trials awaiting verified cleanup. The **Rs49 two-hour pass is Coming soon**; no payment checkout is enabled. See `web/README.md` for scheduler operation and cleanup limitations. Local CLI deployments in your own AWS account are not time-limited by this website trial policy.
 
 Use `ebkit deploy SOURCE --max-replicas 1` to explicitly cap autoscaling; the hosted free trial sets this automatically. Without this option, new CLI environments default to a maximum of five replicas and redeploy preserves existing bounds.
+
+
+Redeploy changed code with `ebkit deploy https://github.com/owner/repository --yes`.
+Within the configured AWS account and region, EBKit reuses a unique saved target,
+including custom application/environment names and its port. Each invocation builds
+and deploys a fresh image version. Existing environment variables, replica bounds,
+and the URL remain in place unless you explicitly change their settings.
+If multiple saved environments match, specify `--app` and `--environment`.
+For a renamed ZIP, use `ebkit deploy updated.zip --app YOUR_APP --environment YOUR_ENV --reviewed --yes`.
+On the website, GitHub default-branch changes redeploy automatically while the worker and deployment are active. You can also use **Redeploy in AWS**, or
+**Upload ZIP & redeploy** on the existing project. Updates keep the original trial deadline.
+
+
+### Watch GitHub from the CLI
+
+After the first deployment, keep `ebkit watch https://github.com/owner/repository --yes`
+running to check the default branch every 300 seconds and automatically deploy each
+new commit to the existing environment. Use `--app`, `--environment`, and `--region`
+when multiple saved deployments match. `--interval 120` changes the polling interval;
+`--once` checks once and exits. Ctrl+C stops watching without destroying the deployment.
+The watcher preserves the saved port, URL, environment settings and replica bounds,
+builds a pinned commit, waits for AWS operations, and never recreates a removed environment.
+ZIP updates remain manual. Older deployments without a saved commit establish a baseline
+on their first check. Failed commits are not retried automatically; a new push or manual
+`ebkit deploy` can retry. Watch progress persists in deployment metadata. One watcher per
+target is allowed; after a process crash, the error identifies its stale lock file.
+An optional `EBKIT_GITHUB_TOKEN` increases GitHub API limits; keep it in your local environment.
+
+
+### Environment operations
+
+- `ebkit --profile development health --app APP --environment ENV` shows health causes and application metrics; add `--refresh` for continuous monitoring.
+- `ebkit events --app APP --environment ENV --follow` polls for and prints new deployment events until Ctrl+C.
+- `ebkit options --app APP --environment ENV` lists full configuration option names with values hidden. Apply a JSON array of `Namespace`, `OptionName`, and `Value` with `--file options.json --yes`, or remove a setting with `--remove NAMESPACE/OPTION`.
+- `ebkit config-save --app APP --environment ENV --name staging --yes` and `config-apply` save/apply AWS configuration templates. AWS supports these templates only in Standard Mode; Cluster Mode uses `options`.
+- `ebkit clone --app APP --environment ENV --name staging-env --yes` creates a separately tracked environment using the source version and managed settings. It creates billable resources and does not copy external database data. Use `--no-wait` to return after creation starts.
+- `ebkit swap --app APP --environment blue-env --destination green-env --yes` swaps two Ready environments' CNAMEs. Verify both with `status` afterward.
+- `ebkit version-delete --app APP --environment ENV --version UNUSED_LABEL --yes` removes an unused application version. Versions used in active environments are rejected, and ECR images are retained.
+
+The web exposes these controls in project **Settings ? Cloud controls**, with health and events also available in **Logs**. Advanced mutations require an operator-designated testing/evaluator account and exact environment-name confirmation. Clone reservations obey the existing quota and trial cleanup policy. Web swaps require both projects to belong to the signed-in user and share an application and region. Settings values are kept out of project metadata and logs.

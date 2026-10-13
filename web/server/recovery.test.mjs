@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, writeFile, readFile, rm, access } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm, access, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -9,6 +9,22 @@ import { atomicJSON, readJSON, safeOutput, lockJobs } from './jobs.mjs';
 
 const project = { id: '22222222-2222-4222-8222-222222222222', user_id: 'owner', name: 'recovery-app', repository: 'https://github.com/owner/project', mode: 'live', application_name: 'ebk-recovery', environment_name: 'ebk-recovery-cluster', port: 8080, region: 'us-east-2', revision: 1, status: 'ready', operation_running: false };
 const directories = [], servers = [];
+it('retries temporary journal replacement locks without losing progress', async () => {
+  const root = await directory(), file = path.join(root, 'journal.json');
+  await atomicJSON(file, { state: 'old' });
+  const replace = vi.fn().mockRejectedValueOnce(Object.assign(new Error('locked'), { code: 'EPERM' })).mockRejectedValueOnce(Object.assign(new Error('busy'), { code: 'EBUSY' })).mockImplementation(rename);
+  await atomicJSON(file, { state: 'running' }, replace);
+  expect(replace).toHaveBeenCalledTimes(3);
+  expect(await readJSON(file)).toEqual({ state: 'running' });
+});
+it('preserves the last journal on a permanent filesystem failure', async () => {
+  const root = await directory(), file = path.join(root, 'journal.json');
+  await atomicJSON(file, { state: 'old' });
+  const replace = vi.fn().mockRejectedValue(Object.assign(new Error('disk full'), { code: 'ENOSPC' }));
+  await expect(atomicJSON(file, { state: 'running' }, replace)).rejects.toMatchObject({ code: 'ENOSPC' });
+  expect(replace).toHaveBeenCalledTimes(1);
+  expect(await readJSON(file)).toEqual({ state: 'old' });
+});
 async function directory() { const result = await mkdtemp(path.join(tmpdir(), 'ebkit-recovery-')); directories.push(result); return result; }
 function database(rows, fail = () => false) {
   return { database: { from() {
@@ -25,7 +41,7 @@ function database(rows, fail = () => false) {
 }
 const config = root => ({ trialsEnabled:false,liveEnabled: true, python: process.execPath, allowedEmails: ['owner@example.test'], origins: [], jobRoot: root });
 async function serve(root, admin, deps = {}) {
-  const server = await createWorker(config(root), { admin, authenticate: async()=>({id:'owner',email:'owner@example.test'}), fetch: async url => new Response(JSON.stringify(url.includes('/contents/') ? { type:'file',size:200 } : {private:false,archived:false,default_branch:'main'})), pollInterval: 30, ...deps });
+  const server = await createWorker({...config(root),...deps.config}, { admin, authenticate: async()=>({id:'owner',email:'owner@example.test'}), fetch: async url => new Response(JSON.stringify(url.includes('/contents/') ? { type:'file',size:200 } : {private:false,archived:false,default_branch:'main'})), pollInterval: 30, ...deps });
   await new Promise(resolve => server.listen(0,'127.0.0.1',resolve)); servers.push(server);
   return { server, url: `http://127.0.0.1:${server.address().port}` };
 }
@@ -182,4 +198,29 @@ it('survives an abrupt backend process termination and adopts the detached job o
     await writeFile(path.join(root,'finish'),'yes');
     for(const child of processes) if(child.exitCode===null&&child.signalCode===null){const exited=once(child,'close');child.kill();await exited;}
   }
+});
+
+it('redacts full-option values across a detached job and worker restart', {timeout:12000}, async()=>{
+ const root=await directory(),rows=[{...project}],admin=database(rows),fixture=path.join(root,'options-cli.mjs');
+ await writeFile(fixture,`import {readFile,writeFile,access} from 'node:fs/promises';
+  const file=process.argv[process.argv.indexOf('--file')+1],secret=JSON.parse(await readFile(file,'utf8'))[0].Value;
+  await writeFile(${JSON.stringify(root)}+'/started','yes');process.stdout.write(secret.slice(0,7));
+  while(true){try{await access(${JSON.stringify(root)}+'/finish');break;}catch{await new Promise(r=>setTimeout(r,20));}}
+  process.stdout.write(secret.slice(7));`);
+ const launch=vi.fn((...args)=>spawn(...args));
+ const first=await serve(root,admin,{spawn:launch,durableJobs:true,commandArguments:()=>[fixture],config:{testingEmails:['owner@example.test']}});
+ const response=await post(first.url+`/api/projects/${project.id}/options`,{confirmation:project.environment_name,options:[{Namespace:'namespace',OptionName:'name',Value:'private-options-secret'}]});
+ expect(response.status).toBe(202);await vi.waitFor(()=>access(path.join(root,'started')));
+ await close(first.server,root);await serve(root,admin,{spawn:launch,durableJobs:true});
+ await writeFile(path.join(root,'finish'),'yes');await vi.waitFor(()=>expect(rows[0].operation_running).toBe(false),{timeout:6000});
+ expect(launch).toHaveBeenCalledOnce();expect(rows[0].operation_log).toContain('[REDACTED]');
+ expect(JSON.stringify(rows)).not.toContain('private-options-secret');
+ const saved=await readJSON(path.join(root,`journal-${project.id}.json`));expect(JSON.stringify(saved)).not.toContain('private-options-secret');
+});
+
+it('replays variable-name updates from a finished config journal without retaining values',async()=>{
+ const root=await directory(),rows=[{...project,variable_names:['OLD'],operation_running:true}];
+ await journal(root,{operation:'config',body:{environmentNames:['NEW'],unset:['OLD']},state:'finished',code:0});
+ const launch=vi.fn();await serve(root,database(rows),{spawn:launch,durableJobs:true});
+ await vi.waitFor(()=>expect(rows[0].operation_running).toBe(false));expect(rows[0].variable_names).toEqual(['NEW']);expect(launch).not.toHaveBeenCalled();
 });

@@ -56,8 +56,7 @@ class ContainerStrategy(str, Enum):
       compile step (e.g. Go, Java, TypeScript).
     - SINGLE_STAGE: One stage; install deps then run.  Suitable for
       Python/Node interpreted apps.
-    - DISTROLESS: Use a Google distroless runtime image.  Only appropriate
-      when the app is a statically compiled binary.
+    - DISTROLESS: Use a Google distroless runtime image.  Available for supported compiled and language runtimes with compatible builders.
     """
     MULTI_STAGE = "multi_stage"
     SINGLE_STAGE = "single_stage"
@@ -281,7 +280,7 @@ class DeploymentConfig(BaseModel):
             "Container build strategy. "
             "Use multi_stage for compiled languages or TypeScript. "
             "Use single_stage for Python/Node interpreted apps. "
-            "Use distroless ONLY for statically compiled binaries."
+            "Use distroless with compatible Go, Java, Node or Python runtime images."
         ),
     )
     eb_deployment_strategy: EBDeploymentStrategy = Field(
@@ -397,13 +396,13 @@ class DeploymentConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def distroless_only_for_compiled(self) -> "DeploymentConfig":
+    def distroless_runtime_support(self) -> "DeploymentConfig":
         """
-        Distroless images are not suitable for Python/Node interpreted runtimes.
-        Auto-correct to single_stage rather than failing — the AI may hallucinate.
+        Python and Node have official distroless language runtimes. Ruby/PHP
+        require a separate compatible minimal-runtime recipe.
         """
         if self.container_strategy == ContainerStrategy.DISTROLESS:
-            if self.language in (Language.PYTHON, Language.NODE, Language.RUBY, Language.PHP):
+            if self.language in (Language.RUBY, Language.PHP):
                 self.container_strategy = ContainerStrategy.SINGLE_STAGE
         return self
 
@@ -416,10 +415,10 @@ class DeploymentConfig(BaseModel):
             tag = f"python:{ver}-slim" if ver else "python:3.12-slim"
             return tag
         if self.language == Language.NODE:
-            tag = f"node:{ver}-alpine" if ver else "node:20-alpine"
+            tag = f"node:{ver}-trixie-slim" if ver else "node:24-trixie-slim"
             return tag
         if self.language == Language.GO:
-            return f"golang:{ver}-alpine" if ver else "golang:1.22-alpine"
+            return f"golang:{ver}-trixie" if ver else "golang:1.26-trixie"
         if self.language == Language.JAVA:
             return f"eclipse-temurin:{ver}-jre-alpine" if ver else "eclipse-temurin:21-jre-alpine"
         if self.language == Language.RUBY:
@@ -430,10 +429,10 @@ class DeploymentConfig(BaseModel):
         """Return the build-stage base image for multi-stage builds."""
         ver = self.runtime_version or ""
         if self.language == Language.GO:
-            return f"golang:{ver}-alpine" if ver else "golang:1.22-alpine"
+            return f"golang:{ver}-trixie" if ver else "golang:1.26-trixie"
         if self.language == Language.NODE:
             # Build with full node, run with alpine
-            return f"node:{ver}-alpine" if ver else "node:20-alpine"
+            return f"node:{ver}-trixie-slim" if ver else "node:24-trixie-slim"
         # Python builds and runs on the same image
         return self.base_image()
 
