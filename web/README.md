@@ -220,9 +220,14 @@ Swaps accept an owned destination project ID; arbitrary environment names are ne
 After a swap, cached URLs are cleared until Status retrieves the new AWS CNAMEs.
 Saved AWS configuration templates support Standard environments only; Cluster settings use options.
 
-Optional `EBKIT_AWS_PROFILES=development,operations` enables named profiles in Cloud controls.
-Set `EBKIT_AWS_ACCOUNT_ID` to the operator's 12-digit account ID too. Only these profile names are
-accepted, and CLI STS checks reject credentials for another account before environment operations.
-The selected profile is used for Cloud controls, including production operations. Profiles choose
-credentials for an action in the same account, not a different user's AWS account. No credentials
-are accepted from the browser or stored in project metadata.
+All live AWS actions from the hosted website run on the EBKit backend using the service operator's
+AWS account and IAM permissions. Users do not connect their own AWS accounts. Only users allowed
+by `EBKIT_ALLOWED_EMAILS` can request live deployments and cloud operations; advanced changes also
+require operator-designated testing/evaluator access and environment-name confirmation.
+
+The service operator may configure `EBKIT_AWS_PROFILES=development,operations` and the matching
+`EBKIT_AWS_ACCOUNT_ID` to expose approved named profiles in Cloud controls. Authorized website
+users can select among those operator-configured profiles for an action, including production
+operations. These profiles still use credentials in the operator's configured AWS account; they
+are not personal user profiles or a way to access another AWS account. The browser never receives
+AWS credentials, and credentials are not stored in project metadata.
