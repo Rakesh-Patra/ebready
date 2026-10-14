@@ -29,3 +29,5 @@ ebkit operations pipeline --app APP --environment ENV --file pipeline.json
 ```
 
 See [production operations](OPERATIONS.md) for JSON examples and external-service setup. These commands call real AWS APIs; automated tests mock AWS and do not create billable infrastructure.
+
+See the [complete command reference and live test checklist](COMMANDS.md).
