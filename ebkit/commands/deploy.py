@@ -38,6 +38,12 @@ _CLUSTER_ROLES = {
     "observability": "aws-elasticbeanstalk-eks-observability-role",
 }
 
+
+class ImageBuildError(RuntimeError):
+    def __init__(self, message, project_name, build_id):
+        super().__init__(message)
+        self.build_info = {'codebuild_project': project_name, 'build_id': build_id}
+
 _CLUSTER_POLICIES = {
     "cluster": [
         "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy",
@@ -446,7 +452,10 @@ def _build_image_in_aws(
         ],
     )
     build_id = result["build"]["id"]
-    _wait_for_codebuild(codebuild_client, build_id)
+    try:
+        _wait_for_codebuild(codebuild_client, build_id)
+    except (RuntimeError, TimeoutError) as error:
+        raise ImageBuildError(str(error), project_name, build_id) from error
     return {"project_name": project_name, "build_id": build_id}
 
 
@@ -754,6 +763,11 @@ def _execute_deploy(
         **({'commit':commit} if commit else {}),
         **({'release_policy':release_policy} if release_policy else {}),
     )
+    except ImageBuildError as error:
+        deployment.update(error.build_info)
+        deployment['status'] = 'BUILD_FAILED'
+        _persist_deployment(deployment)
+        raise
     finally:
         if zip_source:
             try:

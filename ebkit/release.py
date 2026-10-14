@@ -46,7 +46,7 @@ def verify_http(cname,policy):
     # Probe only the AWS-returned Beanstalk hostname, never a browser-supplied URL.
     if not isinstance(cname,str) or not re.fullmatch(r'[A-Za-z0-9.-]+\.elasticbeanstalk\.com',cname):
         raise ValueError('AWS did not return a supported Beanstalk CNAME for verification.')
-    url='http://'+cname+policy['healthPath']
+    url='https://'+cname+policy['healthPath']
     for attempt in range(policy['attempts']):
         try:
             with build_opener(NoRedirect).open(Request(url,headers={'User-Agent':'EBKit-Release-Check'}),timeout=10) as response:

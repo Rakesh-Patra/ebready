@@ -519,6 +519,8 @@ def _prompt_ai_provider(default_choice: str = "1") -> str:
     type=int,
     help="Maximum automatic repair attempts using Docker AI (Gordon) [default: 2].",
 )
+@click.option('--env-file', type=click.Path(exists=True, dir_okay=False, resolve_path=True), help='Private runtime environment settings for local container checks; not baked into the image.')
+@click.option('--network', help='Existing Docker network for local runtime checks.')
 def init_command(
     path: Optional[str],
     repo: Optional[str],
@@ -536,6 +538,8 @@ def init_command(
     max_repair_attempts: int,
     source_zip: Optional[str] = None,
     service_url: Optional[str] = None,
+    env_file: Optional[str] = None,
+    network: Optional[str] = None,
 ) -> None:
     """
     Initialize EBReady deployment kit with interactive setup wizard.
@@ -1031,6 +1035,8 @@ def init_command(
                 image_tag=tag,
                 port=config.port,
                 health_check_path=config.health_check_path,
+                **({'env_file':env_file} if env_file else {}),
+                **({'network':network} if network else {}),
             )
             if runtime_result.passed:
                 click.echo("✓ Health check passed")
@@ -1070,6 +1076,8 @@ def init_command(
                         image_tag=tag,
                         port=config.port,
                         health_check_path=config.health_check_path,
+                        **({'env_file':env_file} if env_file else {}),
+                        **({'network':network} if network else {}),
                     )
                     if runtime_result.passed:
                         click.echo("✓ Health check passed")

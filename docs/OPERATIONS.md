@@ -14,13 +14,17 @@ Run `ebkit operations ACTION --app APP --environment ENV --file settings.json`. 
 
 The subnets must span two availability zones in the same VPC. Creation uses a private, encrypted PostgreSQL instance, seven-day backups, deletion protection, a dedicated security group and Secrets Manager-managed credentials. `database-network` grants port 5432 only from the supplied application security group. `database-status` reports readiness; `database-attach` merges DATABASE_URL into AWS environment configuration without printing credentials. Reattach after rotating the managed password.
 
+`database-create` can provision the external database before the EB environment exists when explicit application and environment names are supplied.
+
 `database-check` executes SELECT 1. Install `ebkit[database]` and run the CLI/worker with a route into the private VPC. `database-migrate` accepts reviewed SQL:
 
 ```json
 {"migrations":[{"id":"001-create-notes","sql":"CREATE TABLE notes (id BIGINT PRIMARY KEY, body TEXT NOT NULL)"}]}
 ```
 
-Migrations run with a PostgreSQL advisory lock and checksum ledger. Applied migrations cannot silently change. SQL cannot control transactions or modify the ledger. Snapshot first with `database-snapshot`. Automatic application rollback does not undo schema migrations.
+Migrations run with a PostgreSQL advisory lock and checksum ledger. Applied migrations cannot silently change. SQL cannot control transactions or modify the ledger. For an operator-created SSH/SSM tunnel to the private endpoint, database-check/migrate also accept `{"tunnelPort":15432}`; PostgreSQL TLS stays required and the connection uses localhost only. Procedural function blocks are supported; top-level transaction commands remain rejected.
+
+Snapshot first with `database-snapshot`. Automatic application rollback does not undo schema migrations.
 
 Databases survive environment deletion. `database-delete` requires `databaseConfirmation` matching the managed database identifier and retains a final snapshot and automated backups. Network resources require separate cleanup. Production instance sizing and Multi-AZ availability must be reviewed before creating the database.
 

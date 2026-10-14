@@ -8,6 +8,15 @@ from ebkit.pipeline import generate_pipeline
 from ebkit.release import validate_policy,buildspec,verify_or_recover
 
 
+def test_leftovers_includes_build_resources_and_deduplicates_tags():
+ tagging=MagicMock();session=MagicMock();session.client.return_value=tagging
+ tagging.get_resources.side_effect=[{'ResourceTagMappingList':[{'ResourceARN':'db'}]}, {'ResourceTagMappingList':[{'ResourceARN':'image'},{'ResourceARN':'db'}]}]
+ eb=MagicMock();eb.describe_environments.return_value={'Environments':[]}
+ report=ops.leftovers(session,eb,'app','env')
+ assert [item['arn'] for item in report['resources']]==['db','image']
+ assert [call.kwargs['TagFilters'][0]['Key'] for call in tagging.get_resources.call_args_list]==['ebkit:application','EBKitApplication']
+
+
 def freeze_cost_date(monkeypatch):
  clock=MagicMock(wraps=datetime);clock.now.return_value=datetime(2026,10,14,tzinfo=timezone.utc)
  monkeypatch.setattr(ops,'datetime',clock)
@@ -91,3 +100,20 @@ def test_database_rejects_wrong_vpc_before_creation():
  session=MagicMock();session.client.return_value.describe_subnets.return_value={'Subnets':[{'VpcId':'vpc-other','AvailabilityZone':'a'}]}
  with pytest.raises(Exception):ops.database_create(session,MagicMock(),'app','env',{}, {'vpcId':'vpc-abc','subnetIds':['a','b'],'applicationSecurityGroup':'sg-abc'})
  session.client.return_value.create_db_instance.assert_not_called()
+
+
+def test_migrations_allow_procedural_blocks_but_reject_transaction_control():
+ assert not ops.migration_has_transaction_control("DO $$ BEGIN RAISE NOTICE 'ok'; END $$;")
+ assert not ops.migration_has_transaction_control("DO $body$ BEGIN RAISE NOTICE 'ok'; END $body$;")
+ assert not ops.migration_has_transaction_control("SELECT 'BEGIN'; -- COMMIT\nSELECT 1;")
+ for sql in ('BEGIN; SELECT 1;', 'SELECT 1; COMMIT;', 'ROLLBACK;', 'SAVEPOINT example;', 'END;'):
+  assert ops.migration_has_transaction_control(sql)
+
+
+def test_release_probe_uses_https_for_beanstalk_hostname(monkeypatch):
+ from ebkit import release
+ response=MagicMock();response.__enter__.return_value=response;response.status=200;response.read.return_value=b'{"status":"ok"}'
+ opener=MagicMock();opener.open.return_value=response
+ monkeypatch.setattr(release,'build_opener',lambda *args:opener)
+ assert release.verify_http('test.us-east-2.elasticbeanstalk.com',{'healthPath':'/health','expectedText':'ok','attempts':1})
+ assert opener.open.call_args.args[0].full_url=='https://test.us-east-2.elasticbeanstalk.com/health'

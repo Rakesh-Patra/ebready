@@ -29,6 +29,10 @@ EBKit production Dockerfile contract (mandatory):
   with '|| true'. COPY is not shell syntax. Never copy a builder filesystem wholesale.
 - Use versioned bases, preferably registry-resolved SHA256 digests. Never invent a
   digest or substitute ':latest' with an arbitrary ':slim' tag.
+- Use publicly pullable Docker Hub or gcr.io base images. Do not use dhi.io:
+  EBKit's default CodeBuild environment has no credentials for that registry.
+  For a static Go build, use a supported explicit golang version matching go.mod;
+  frontend-only Node builders can use official supported Node images.
 - EXPOSE only the supplied application port; listen on 0.0.0.0 and use SIGTERM.
   Cluster readiness/liveness probes do not require installing curl into the image.
 - Never copy secrets (.env, .aws, .ssh, credentials) or embed credentials in ENV/ARG.

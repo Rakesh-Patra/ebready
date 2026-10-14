@@ -25,7 +25,9 @@ from ebkit.validator.docker_validator import DockerBuildValidator, DockerRuntime
 @click.option("--health-path", default="/", show_default=True, help="Preferred HTTP probe path; also tries /health, /healthz and /.")
 @click.option("--json", "as_json", is_flag=True, help="Emit a machine-readable report; use --yes to approve fixes/verification.")
 @click.option("-y", "--yes", is_flag=True, help="Approve proposed repairs and local build/runtime execution.")
-def doctor_command(github_url, output, project, port, fix, verify, production, require_distroless, scout, pin_bases, health_path, as_json, yes):
+@click.option('--env-file', type=click.Path(exists=True, dir_okay=False, resolve_path=True), help='Private settings for the local runtime check; not baked into the image.')
+@click.option('--network', help='Existing Docker network for the local runtime check.')
+def doctor_command(github_url, output, project, port, fix, verify, production, require_distroless, scout, pin_bases, health_path, as_json, yes, env_file=None, network=None):
     """Find deployment blockers, review repairs, and verify locally.
 
     Checks are deterministic and do not require an AI key or AWS credentials.
@@ -93,7 +95,7 @@ def doctor_command(github_url, output, project, port, fix, verify, production, r
         if verify:
             approved = yes or (not as_json and click.confirm("Build and run this project's code in local Docker for verification?", default=False))
             if approved:
-                report["verification"].update(verify_project(project, port, health_path, scan_image=scout))
+                report["verification"].update(verify_project(project, port, health_path, scan_image=scout, **({'env_file':env_file} if env_file else {}), **({'network':network} if network else {})))
             else:
                 report["verification"]["reason"] = "Local execution was not approved."
         if snapshot:
@@ -120,7 +122,7 @@ def doctor_command(github_url, output, project, port, fix, verify, production, r
         raise click.ClickException(str(error)) from error
 
 
-def verify_project(project: Path, port: int, health_path: str, scan_image=False) -> dict:
+def verify_project(project: Path, port: int, health_path: str, scan_image=False, env_file=None, network=None) -> dict:
     builder = DockerBuildValidator()
     if not builder.is_docker_available():
         return dict(build="not_verified", runtime="not_verified", reason="Docker daemon unavailable. Static checks do not prove runtime readiness.")
@@ -131,7 +133,7 @@ def verify_project(project: Path, port: int, health_path: str, scan_image=False)
         if not build.success:
             return dict(build="failed", runtime="not_verified", reason="Docker build failed. Review the Dockerfile and run docker build locally for logs.")
         runtime = DockerRuntimeValidator(container_name=f"ebkit-doctor-{uuid4().hex}")
-        result = runtime.validate(tag, port=port, health_check_path=health_path, bind_host="127.0.0.1")
+        result = runtime.validate(tag, port=port, health_check_path=health_path, bind_host="127.0.0.1", **({'env_file':env_file} if env_file else {}), **({'network':network} if network else {}))
         report = dict(build="passed", runtime="passed" if result.passed else "failed",
                     reason="HTTP probe passed." if result.passed else "Container startup or HTTP probe failed. Check required environment settings and startup configuration.")
         if scan_image:

@@ -17,6 +17,15 @@ ACTIONS=['metrics','alarm','autoscale','cost','budget','leftovers','database-cre
 READ_ACTIONS={'metrics','cost','leftovers','database-status','database-check','pipeline'}
 
 
+def migration_has_transaction_control(sql):
+    # Procedural BEGIN/END inside dollar-quoted function bodies are not
+    # transaction commands. PostgreSQL still executes the entire migration
+    # inside the connection's transaction.
+    code = re.sub(r"\$(?P<tag>[A-Za-z_][A-Za-z0-9_]*|)\$.*?\$(?P=tag)\$|'(?:''|[^'])*'|--[^\n]*|/\*.*?\*/",
+                  ' ', sql, flags=re.DOTALL)
+    return bool(re.search(r'\b(?:COMMIT|ROLLBACK|BEGIN|END|SAVEPOINT|VACUUM)\b', code, re.IGNORECASE))
+
+
 def config_file(file):
     if not file:return {}
     path=Path(file)
@@ -43,7 +52,7 @@ def metric_queries(session,eb,env):
     def metric(id,name,namespace,dimensions,stat='Average',label=None):
         return {'Id':id,'Label':label or name,'MetricStat':{'Metric':{'Namespace':namespace,'MetricName':name,'Dimensions':dimensions},'Period':300,'Stat':stat},'ReturnData':True}
     cpu=metric('counter','container_cpu_usage_seconds_total','ElasticBeanstalk/Infrastructure',dims);cpu['ReturnData']=False
-    queries=[cpu,{'Id':'cpu','Label':'CPU cores (rate)','Expression':'RATE(counter)','ReturnData':True},metric('memory','container_memory_working_set_bytes','ElasticBeanstalk/Infrastructure',dims,label='Memory bytes'),metric('replicas','EnvironmentReplicas','ElasticBeanstalk/Infrastructure',dims,label='Ready replicas')]
+    queries=[cpu,{'Id':'cpu','Label':'CPU cores (rate)','Expression':'IF(RATE(counter)>=0,RATE(counter))','ReturnData':True},metric('memory','container_memory_working_set_bytes','ElasticBeanstalk/Infrastructure',dims,label='Memory bytes'),metric('replicas','EnvironmentReplicas','ElasticBeanstalk/Infrastructure',dims,label='Ready replicas')]
     resources=environment_resources(eb,env,session.region_name)
     for item in resources.get('LoadBalancers',[]):
         name=item.get('Name','')
@@ -74,7 +83,7 @@ def monitoring(session,eb,env,data):
         if not token:break
         if token in tokens or len(tokens)>=20:raise RuntimeError('Metric pagination limit reached.')
         tokens.add(token);args['NextToken']=token
-    return {'environment':env,'hours':hours,'series':list(series.values()),'note':'Missing samples are not zero. CPU is counter rate in cores. Request/error/latency data require an Application Load Balancer.'}
+    return {'environment':env,'hours':hours,'series':list(series.values()),'note':'Missing samples are not zero. CPU is counter rate in cores; negative rates from container counter resets are omitted. Request/error/latency data require an Application Load Balancer.'}
 
 
 def alarm(session,eb,app,env,data):
@@ -139,14 +148,18 @@ def budget(session,app,env,data):
 
 
 def leftovers(session,eb,app,env):
-    args={'TagFilters':[{'Key':'ebkit:application','Values':[app]}],'ResourcesPerPage':100};items=[];tokens=set()
-    while True:
-        page=session.client('resourcegroupstaggingapi').get_resources(**args)
-        items.extend({'arn':item['ResourceARN'],'tags':item.get('Tags',[])} for item in page.get('ResourceTagMappingList',[]))
-        token=page.get('PaginationToken')
-        if not token:break
-        if token in tokens or len(tokens)>=20:raise RuntimeError('Resource inventory pagination limit reached.')
-        tokens.add(token);args['PaginationToken']=token
+    items=[];seen=set()
+    for key in ('ebkit:application','EBKitApplication'):
+        args={'TagFilters':[{'Key':key,'Values':[app]}],'ResourcesPerPage':100};tokens=set()
+        while True:
+            page=session.client('resourcegroupstaggingapi').get_resources(**args)
+            for item in page.get('ResourceTagMappingList',[]):
+                if item['ResourceARN'] not in seen:
+                    seen.add(item['ResourceARN']);items.append({'arn':item['ResourceARN'],'tags':item.get('Tags',[])})
+            token=page.get('PaginationToken')
+            if not token:break
+            if token in tokens or len(tokens)>=20:raise RuntimeError('Resource inventory pagination limit reached.')
+            tokens.add(token);args['PaginationToken']=token
     live=eb.describe_environments(ApplicationName=app,EnvironmentNames=[env],IncludeDeleted=False).get('Environments',[])
     return {'environment':env,'environmentExists':bool(live),'resources':items,'coverage':'Tagged application resources only. RDS and stored images can remain billable after environment teardown; retained resources are not automatically deleted.'}
 
@@ -163,6 +176,9 @@ def owned_database(session,app):
 
 
 def database_create(session,eb,app,env,record,data):
+    record = dict(record)
+    record.update(application_name=app, environment_name=env, region=session.region_name,
+                  account_id=session.client('sts').get_caller_identity()['Account'])
     ec2=session.client('ec2');rds=session.client('rds');vpc=data.get('vpcId');subnets=data.get('subnetIds',[]);source=data.get('applicationSecurityGroup')
     if not re.fullmatch(r'vpc-[a-f0-9]+',vpc or '') or not isinstance(subnets,list) or len(subnets)<2 or not re.fullmatch(r'sg-[a-f0-9]+',source or ''):raise click.UsageError('Provide vpcId, at least two subnetIds and applicationSecurityGroup.')
     rows=ec2.describe_subnets(SubnetIds=subnets).get('Subnets',[])
@@ -211,7 +227,10 @@ def database_action(action,session,eb,app,env,record,data):
     try:import psycopg
     except ImportError:raise click.ClickException('Install ebkit[database] to enable PostgreSQL connection checks and SQL migrations.') from None
     try:
-        with psycopg.connect(host=endpoint['Address'],port=endpoint['Port'],dbname='ebkit',user=credentials['username'],password=credentials['password'],sslmode='require',connect_timeout=10) as connection:
+        tunnel_port = data.get('tunnelPort')
+        if tunnel_port is not None and (type(tunnel_port) is not int or not 1 <= tunnel_port <= 65535):
+            raise click.UsageError('tunnelPort must be an integer between 1 and 65535.')
+        with psycopg.connect(host='127.0.0.1' if tunnel_port is not None else endpoint['Address'],port=tunnel_port if tunnel_port is not None else endpoint['Port'],dbname='ebkit',user=credentials['username'],password=credentials['password'],sslmode='require',connect_timeout=10) as connection:
             with connection.cursor() as cursor:
                 cursor.execute('SELECT 1')
                 if action=='database-check':return {'database':identifier,'connection':'passed','query':'SELECT 1','network':'The CLI/worker must have a route into the private VPC.'}
@@ -222,7 +241,7 @@ def database_action(action,session,eb,app,env,record,data):
                 applied=[]
                 for migration in migrations:
                     if not isinstance(migration,dict) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}',migration.get('id','')) or not isinstance(migration.get('sql'),str) or not migration['sql'].strip() or len(migration['sql'])>65536:raise click.UsageError('Invalid migration definition.')
-                    if re.search(r'\b(?:COMMIT|ROLLBACK|BEGIN|END|SAVEPOINT|VACUUM)\b|ebkit_schema_migrations',migration['sql'],re.IGNORECASE):raise click.UsageError('Migration SQL cannot control transactions or modify the migration ledger.')
+                    if migration_has_transaction_control(migration['sql']) or re.search(r'ebkit_schema_migrations',migration['sql'],re.IGNORECASE):raise click.UsageError('Migration SQL cannot control transactions or modify the migration ledger.')
                     checksum=hashlib.sha256(migration['sql'].encode()).hexdigest();cursor.execute('SELECT checksum FROM ebkit_schema_migrations WHERE id=%s',(migration['id'],));prior=cursor.fetchone()
                     if prior:
                         if prior[0]!=checksum:raise click.UsageError('Previously applied migration content changed. Add a new migration instead.')
@@ -242,7 +261,7 @@ def database_action(action,session,eb,app,env,record,data):
 def operations_command(action,app,environment_name,region,file,yes):
     """Operate databases, metrics, alarms, autoscaling and budgets."""
     data=config_file(file)
-    detached=action in {'cost','budget','leftovers','database-status','database-check','database-delete','database-snapshot','database-migrate','database-network'}
+    detached=action in {'cost','budget','leftovers','database-create','database-status','database-check','database-delete','database-snapshot','database-migrate','database-network'}
     if detached and app and environment_name:
         selected=deployment_ops._region_option(region);session,account=deployment_ops._aws_session(selected);env=environment_name
         records=deployment_ops._matching_deployments(account,selected,app,env);record=records[-1] if records else {}

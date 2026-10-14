@@ -596,6 +596,8 @@ class DockerRuntimeValidator:
         timeout: int = 60,
         health_check_path: Optional[str] = None,
         bind_host: Optional[str] = None,
+        env_file: Optional[str] = None,
+        network: Optional[str] = None,
     ) -> RuntimeResult:
         """
         Run *image_tag* as a detached container mapping HOST_FREE_PORT -> CONTAINER_APPLICATION_PORT,
@@ -639,8 +641,12 @@ class DockerRuntimeValidator:
                 "-d",
                 "-p", f"{bind_host + ':' if bind_host else ''}{host_port}:{port}",
                 "--name", self.container_name,
-                image_tag,
             ]
+            if env_file:
+                run_cmd.extend(['--env-file', str(Path(env_file).resolve())])
+            if network:
+                run_cmd.extend(['--network', network])
+            run_cmd.append(image_tag)
             logger.info("Starting container: %s", " ".join(run_cmd))
             try:
                 proc = subprocess.run(

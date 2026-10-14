@@ -15,6 +15,8 @@ Watch checks every 300 seconds, deploys a pinned commit once, preserves environm
 
 Use `--app`, `--environment`, and `--region` to select targets. Named credentials profiles use `ebkit --profile PROFILE COMMAND`.
 
+For an application that needs a database to start, `init` and `doctor` accept `--env-file .env` and `--network NETWORK` for local runtime checks. Keep the file private and use an existing Docker network with access to the database. These values are supplied to the running container, not baked into the Docker image.
+
 ## Environment controls
 
 `status`, `logs`, `events --follow`, `health --refresh`, `versions`, `resources`, `config`, `options`, `scale`, `clone`, `swap`, `rollback`, `version-delete`, `destroy`, and `cleanup-status` provide deployment lifecycle controls. Run each command with `--help` for required parameters. Configuration values are hidden. AWS saved configuration templates (`config-save`/`config-apply`) support Standard environments only.
@@ -31,3 +33,5 @@ ebkit operations pipeline --app APP --environment ENV --file pipeline.json
 See [production operations](OPERATIONS.md) for JSON examples and external-service setup. These commands call real AWS APIs; automated tests mock AWS and do not create billable infrastructure.
 
 See the [complete command reference and live test checklist](COMMANDS.md).
+
+For a plain-language introduction, see [EBKit features](FEATURES.md).

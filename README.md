@@ -8,7 +8,7 @@ EBKit generates and checks Docker deployment kits and manages AWS Elastic Beanst
 - Health/events, configuration controls and named AWS profiles.
 - External PostgreSQL lifecycle, SQL migrations, CloudWatch history/alarms, guided autoscaling, verified releases, GitHub OIDC pipeline generation and scoped billing/budget tools.
 
-**Documentation:** [CLI guide](docs/CLI.md) ? [Web guide](web/README.md) ? [Production operations and live test checklist](docs/OPERATIONS.md) ? [Initialization](docs/initialization.md)
+**Start here:** [Features explained simply](docs/FEATURES.md) | [CLI guide](docs/CLI.md) | [Web guide](web/README.md) | [Database, monitoring and cost tools](docs/OPERATIONS.md) | [Initialization](docs/initialization.md)
 
 Automated tests cover local behavior and mocked AWS integrations. Live AWS integration tests are still required. AWS resources incur charges; external databases and snapshots persist independently of environment teardown. Cost reports explicitly identify attribution limits.
 

@@ -7,6 +7,19 @@ import type {Project} from './lib';
 vi.mock('./lib',async importOriginal=>({...await importOriginal<typeof import('./lib')>(),backend:vi.fn(async()=>({profiles:['operator']}))}));
 afterEach(cleanup);
 const project={user_id:'owner',repository:'https://github.com/a/b',stage:6,created_at:new Date().toISOString(),id:'one',mode:'live',status:'ready',name:'app',application_name:'app',environment_name:'source-env',region:'us-east-2',variable_names:[],port:8080,revision:1,replicas:1} as Project;
+
+it('guides an operation with relevant settings, exact confirmation and visible server errors',async()=>{
+ const action=vi.fn(async()=>{throw new Error('Test backend error');}),user=userEvent.setup();
+ render(<CloudControls project={project} projects={[project]} privileged busy={false} onAction={action}/>);
+ await user.selectOptions(screen.getByLabelText('Production operation'),'autoscale');
+ const settings=JSON.parse((screen.getByLabelText('Reviewed operation JSON') as HTMLTextAreaElement).value);
+ expect(settings).toMatchObject({minimum:1,maximum:2,cpuPercent:75});
+ expect((screen.getByRole('button',{name:'Run production operation'}) as HTMLButtonElement).disabled).toBe(true);
+ await user.type(screen.getByLabelText('Confirm production changes'),'source-env');
+ await user.click(screen.getByRole('button',{name:'Run production operation'}));
+ expect((await screen.findByRole('alert')).textContent).toContain('Test backend error');
+ expect(action).toHaveBeenCalledWith(project,'production',{action:'autoscale',configuration:settings,confirmation:'source-env'});
+});
 it('shows read controls to ordinary users and hides advanced mutations',()=>{
  render(<CloudControls project={project} projects={[project]} privileged={false} busy={false} onAction={vi.fn()}/>);
  expect(screen.getByRole('button',{name:'Detailed health'})).toBeTruthy();expect(screen.queryByRole('button',{name:'Clone environment'})).toBeNull();
