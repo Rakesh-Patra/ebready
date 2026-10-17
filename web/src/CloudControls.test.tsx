@@ -11,22 +11,24 @@ const project={user_id:'owner',repository:'https://github.com/a/b',stage:6,creat
 it('guides an operation with relevant settings, exact confirmation and visible server errors',async()=>{
  const action=vi.fn(async()=>{throw new Error('Test backend error');}),user=userEvent.setup();
  render(<CloudControls project={project} projects={[project]} privileged busy={false} onAction={action}/>);
+ await user.click(screen.getByText('Advanced AWS settings'));
+ await user.click(screen.getByText('Infrastructure tools: databases, spending & automation'));
  await user.selectOptions(screen.getByLabelText('Production operation'),'autoscale');
- const settings=JSON.parse((screen.getByLabelText('Reviewed operation JSON') as HTMLTextAreaElement).value);
+ const settings=JSON.parse((screen.getByLabelText('Operation settings (JSON)') as HTMLTextAreaElement).value);
  expect(settings).toMatchObject({minimum:1,maximum:2,cpuPercent:75});
- expect((screen.getByRole('button',{name:'Run production operation'}) as HTMLButtonElement).disabled).toBe(true);
+ expect((screen.getByRole('button',{name:'Run selected tool'}) as HTMLButtonElement).disabled).toBe(true);
  await user.type(screen.getByLabelText('Confirm production changes'),'source-env');
- await user.click(screen.getByRole('button',{name:'Run production operation'}));
+ await user.click(screen.getByRole('button',{name:'Run selected tool'}));
  expect((await screen.findByRole('alert')).textContent).toContain('Test backend error');
  expect(action).toHaveBeenCalledWith(project,'production',{action:'autoscale',configuration:settings,confirmation:'source-env'});
 });
 it('shows read controls to ordinary users and hides advanced mutations',()=>{
  render(<CloudControls project={project} projects={[project]} privileged={false} busy={false} onAction={vi.fn()}/>);
- expect(screen.getByRole('button',{name:'Detailed health'})).toBeTruthy();expect(screen.queryByRole('button',{name:'Clone environment'})).toBeNull();
+ expect(screen.getByRole('button',{name:'Check app health'})).toBeTruthy();expect(screen.queryByRole('button',{name:'Clone environment'})).toBeNull();
 });
 it('requires exact confirmation and sends variable changes',async()=>{
  const action=vi.fn(async()=>{}),user=userEvent.setup();render(<CloudControls project={project} projects={[project]} privileged={false} busy={false} onAction={action}/>);
- await user.click(screen.getByText('Application environment variables'));await user.type(screen.getByLabelText('Settings to merge (KEY=VALUE)'),'NEW=value');
+ await user.click(screen.getByText('App variables'));await user.type(screen.getByLabelText('Add or update variables (KEY=VALUE)'),'NEW=value');
  expect((screen.getByRole('button',{name:'Apply variable changes'}) as HTMLButtonElement).disabled).toBe(true);
  await user.type(screen.getByLabelText('Confirm changes by typing the environment name'),'source-env');await user.click(screen.getByRole('button',{name:'Apply variable changes'}));
  expect(action).toHaveBeenCalledWith(project,'config',{environment:{NEW:'value'},unset:[],confirmation:'source-env'});
@@ -34,7 +36,7 @@ it('requires exact confirmation and sends variable changes',async()=>{
 it('requires cost acknowledgement for clones and sends an owned swap ID',async()=>{
  const action=vi.fn(async()=>{}),user=userEvent.setup();const green={...project,id:'green',name:'green',environment_name:'green-env'};
  render(<CloudControls project={project} projects={[project,green]} privileged busy={false} onAction={action}/>);
- await user.type(screen.getByLabelText('Confirm changes by typing the environment name'),'source-env');await user.click(screen.getByText('Clone and blue/green deployment'));
+ await user.click(screen.getByText('Advanced AWS settings'));await user.type(screen.getByLabelText('Confirm advanced changes by typing the environment name'),'source-env');await user.click(screen.getByText('Copy app or switch live traffic'));
  await user.type(screen.getByLabelText('Clone project name'),'clone-app');expect((screen.getByRole('button',{name:'Clone environment'}) as HTMLButtonElement).disabled).toBe(true);
  await user.click(screen.getByRole('checkbox'));await user.click(screen.getByRole('button',{name:'Clone environment'}));
  expect(action).toHaveBeenCalledWith(project,'clone',{name:'clone-app',confirmCosts:true,confirmation:'source-env'});
@@ -43,13 +45,13 @@ it('requires cost acknowledgement for clones and sends an owned swap ID',async()
 });
 it('selects an operator-approved credentials profile',async()=>{
  const action=vi.fn(async()=>{}),user=userEvent.setup();render(<CloudControls project={project} projects={[project]} privileged busy={false} onAction={action}/>);
- await user.selectOptions(await screen.findByLabelText('AWS credentials profile'),'operator');await user.click(screen.getByRole('button',{name:'Detailed health'}));
+ await user.click(screen.getByText('Advanced AWS settings'));await user.selectOptions(await screen.findByLabelText('AWS credentials profile'),'operator');await user.click(screen.getByRole('button',{name:'Check app health'}));
  expect(action).toHaveBeenCalledWith(project,'health',{profile:'operator',confirmation:''});
 });
 
 it('uses the selected credentials profile for production operations',async()=>{
  const action=vi.fn(async()=>{}),user=userEvent.setup();render(<CloudControls project={project} projects={[project]} privileged busy={false} onAction={action}/>);
- await user.selectOptions(await screen.findByLabelText('AWS credentials profile'),'operator');await user.click(screen.getByRole('button',{name:'Run production operation'}));
+ await user.click(screen.getByText('Advanced AWS settings'));await user.selectOptions(await screen.findByLabelText('AWS credentials profile'),'operator');await user.click(screen.getByText('Infrastructure tools: databases, spending & automation'));await user.click(screen.getByRole('button',{name:'Run selected tool'}));
  expect(action).toHaveBeenCalledWith(project,'production',{action:'metrics',configuration:{hours:24},confirmation:'',profile:'operator'});
 });
 
@@ -64,4 +66,17 @@ it('keeps monitoring scheduled across parent renders and uses the latest callbac
   act(()=>vi.advanceTimersByTime(10000));
   expect(first).not.toHaveBeenCalled();expect(second).toHaveBeenCalledWith(project,'events',{});
  }finally{vi.useRealTimers();}
+});
+
+it('keeps technical forms hidden until advanced sections are opened',async()=>{
+ const user=userEvent.setup();render(<CloudControls project={project} projects={[project]} privileged busy={false} onAction={vi.fn()}/>);
+ expect(screen.getByRole('button',{name:'Check app health'})).toBeTruthy();
+ expect((screen.getByLabelText('Confirm advanced changes by typing the environment name').closest('details') as HTMLDetailsElement).open).toBe(false);
+ expect((screen.getByLabelText('Confirm changes by typing the environment name').closest('details') as HTMLDetailsElement).open).toBe(false);
+ expect((screen.getByLabelText('Production operation').closest('details') as HTMLDetailsElement).open).toBe(false);
+ await user.click(screen.getByText('Advanced AWS settings'));
+ expect((screen.getByLabelText('Confirm advanced changes by typing the environment name').closest('details') as HTMLDetailsElement).open).toBe(true);
+ expect((screen.getByLabelText('Production operation').closest('details') as HTMLDetailsElement).open).toBe(false);
+ await user.click(screen.getByText('Infrastructure tools: databases, spending & automation'));
+ expect((screen.getByLabelText('Production operation').closest('details') as HTMLDetailsElement).open).toBe(true);
 });

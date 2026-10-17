@@ -1,0 +1,3 @@
+# Historical sanitizer test input: numeric-only synthetic GitHub PAT fixture.
+# Reviewed at the exact commit/path/line; no rule or test directory is excluded.
+a8755e574ef047c8b6cf0eaeb832726036165f45:tests/test_docker_ai_recovery.py:github-pat:117

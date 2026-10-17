@@ -1,0 +1,11 @@
+# Solo maintainer; add independent trusted reviewers when collaborators join.
+* @Rakesh-Patra
+/.github/ @Rakesh-Patra
+/infra/ @Rakesh-Patra
+/Dockerfile @Rakesh-Patra
+/security/ @Rakesh-Patra
+/.githooks/ @Rakesh-Patra
+/.gitleaks* @Rakesh-Patra
+/scripts/check_staged_secrets.py @Rakesh-Patra
+/web/server/ @Rakesh-Patra
+/web/src/AuthDialog.tsx @Rakesh-Patra

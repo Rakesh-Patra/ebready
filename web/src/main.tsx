@@ -4,4 +4,5 @@ import App from './App';
 import './style.css';
 import './theme.css';
 import './modern.css';
+import './studio.css';
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);

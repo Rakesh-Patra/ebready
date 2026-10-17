@@ -106,3 +106,37 @@ it('rejects signed-out or expired sessions on every cloud endpoint before any AW
  }
  expect(spawn).not.toHaveBeenCalled();expect(from).not.toHaveBeenCalled();expect(inspectZip).not.toHaveBeenCalled();expect(githubRequest).not.toHaveBeenCalled();
 });
+
+it('creates the managed database within deployment and keeps its plan server-side',async()=>{
+ const rows=[],child=fakeProcess(),spawn=vi.fn(()=>child);
+ const {mkdtemp,readFile,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const path=await import('node:path');
+ const directory=await mkdtemp(path.join(tmpdir(),'ebkit-db-choice-'));
+ const request=async url=>{
+  if(url.includes('/git/trees/'))return new Response(JSON.stringify({tree:[{path:'.env.example',type:'blob',size:30}]}));
+  if(url.includes('/contents/.env.example'))return new Response(JSON.stringify({encoding:'base64',content:Buffer.from('POSTGRES_URL=').toString('base64'),size:13}));
+  return github(url);
+ };
+ try{
+  const url=await serve({trialsEnabled:false,liveEnabled:true,python:'python',githubAutoDeploy:false,jobRoot:directory,allowedEmails:['owner@example.test'],evaluatorEmails:['owner@example.test'],databaseTemplates:{'us-east-2':{clusterName:'eb-reviewed',subnetIds:['subnet-aaa','subnet-bbb']}}},{admin:database(rows),authenticate:async()=>({id:'owner',email:'owner@example.test'}),spawn,fetch:request});
+  const body={name:'new-app',repository:project.repository,region:project.region,port:8080,environment:{},confirmCosts:true,database:{mode:'managed',variables:['POSTGRES_URL'],confirmCosts:true}};
+  const headers={Authorization:'Bearer test'};
+  expect((await post(url+'/api/deploy',{...body,managedDatabase:{}},headers)).status).toBe(400);
+  expect((await post(url+'/api/deploy',{...body,database:{...body.database,confirmCosts:false}},headers)).status).toBe(400);
+  expect(rows).toHaveLength(0);expect(spawn).not.toHaveBeenCalled();
+  const response=await post(url+'/api/deploy',body,headers);expect(response.status).toBe(202);
+  expect(rows[0].variable_names).toContain('POSTGRES_URL');
+  const args=spawn.mock.calls[0][1],file=args[args.indexOf('--database-file')+1];
+  expect(JSON.parse(await readFile(file,'utf8'))).toEqual({clusterName:'eb-reviewed',subnetIds:['subnet-aaa','subnet-bbb'],variables:['POSTGRES_URL']});
+  expect(JSON.stringify(rows)).not.toContain('clusterName');
+  child.emit('close',1);await vi.waitFor(()=>expect(rows[0].operation_running).toBe(false));
+ }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+it('rejects malformed or local database URLs without reserving projects',async()=>{
+ const from=vi.fn(),spawn=vi.fn();const url=await serve({trialsEnabled:false,liveEnabled:true,allowedEmails:['owner@example.test']},{admin:{database:{from}},authenticate:async()=>({id:'owner',email:'owner@example.test'}),spawn,fetch:github});
+ for(const value of ['private-password','postgresql://secret@localhost/app']){
+  const response=await post(url+'/api/deploy',{name:'new-app',repository:project.repository,region:project.region,port:8080,confirmCosts:true,environment:{POSTGRES_URL:value}},{Authorization:'Bearer test'});
+  expect(response.status).toBe(400);expect(await response.text()).not.toContain(value);
+ }
+ expect(from).not.toHaveBeenCalled();expect(spawn).not.toHaveBeenCalled();
+});

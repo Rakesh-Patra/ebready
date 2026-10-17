@@ -1,0 +1,2 @@
+.githooks/* text eol=lf
+security/*.tsv text eol=lf

@@ -14,7 +14,10 @@ from urllib.parse import urlsplit
 
 import boto3
 import click
-from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
+from botocore.exceptions import (
+    BotoCoreError, ClientError, ParamValidationError, SSLError,
+    ConnectionClosedError, EndpointConnectionError, ReadTimeoutError,
+)
 
 from ebkit.config import load_config
 from ebkit.deployment_state import save_deployment, load_deployments
@@ -611,10 +614,27 @@ def _poll_environment_health(
 ) -> Dict:
     _info(f"Waiting for '{env_name}' to become ready...")
     started = time.monotonic()
+    connection_failures = 0
     while True:
-        environments = eb_client.describe_environments(
-            ApplicationName=app_name, EnvironmentNames=[env_name], IncludeDeleted=False
-        ).get("Environments", [])
+        try:
+            environments = eb_client.describe_environments(
+                ApplicationName=app_name, EnvironmentNames=[env_name], IncludeDeleted=False
+            ).get("Environments", [])
+            connection_failures = 0
+        except (SSLError, ConnectionClosedError, EndpointConnectionError, ReadTimeoutError) as exc:
+            connection_failures += 1
+            if connection_failures >= 3 or time.monotonic() - started >= timeout:
+                raise RuntimeError(
+                    "AWS accepted the deployment, but its readiness could not be checked. "
+                    "The environment may still be launching. Check Status before redeploying. "
+                    + ("The deployment worker could not verify AWS's certificate; "
+                       "the service operator must check the worker's trusted certificates."
+                       if isinstance(exc, SSLError) else "The connection to AWS was interrupted.")
+                ) from exc
+            _info("Connection to AWS interrupted; retrying the readiness check in 15 seconds "
+                  f"({connection_failures}/3).")
+            time.sleep(15)
+            continue
         if environments:
             environment = environments[0]
             status = environment.get("Status", "Unknown")
@@ -649,7 +669,12 @@ def _execute_deploy(
     commit: Optional[str] = None,
     require_existing: bool = False,
     release_policy: Optional[Dict] = None,
+    database_plan: Optional[Dict] = None,
 ) -> Dict:
+    if database_plan:
+        from ebkit.managed_database import validate_plan
+        database_plan = validate_plan(database_plan)
+        if not wait:raise click.ClickException("Managed database creation requires --wait.")
     if release_policy:
         from ebkit.release import validate_policy
         release_policy=validate_policy(release_policy)
@@ -699,6 +724,8 @@ def _execute_deploy(
     port = port if port is not None else previous.get("port", 8080)
 
     env_vars = _collect_env_vars(env_file, extra_env, is_interactive)
+    if database_plan and any(env_vars.get(name, '').strip() for name in database_plan['variables']):
+        raise click.ClickException('Remove existing database URLs before choosing managed database creation.')
     image_uri = (
         f"{account_id}.dkr.ecr.{region}.amazonaws.com/{app}:v{time.time_ns()}"
     )
@@ -780,7 +807,18 @@ def _execute_deploy(
     deployment["status"] = "BUILD_SUCCEEDED"
     _persist_deployment(deployment)
 
+    database_subnets = None
+    if database_plan:
+        from ebkit.managed_database import prepare_database
+        try:
+            generated, database_subnets = prepare_database(session, app, env, deployment, database_plan)
+            env_vars.update(generated)
+        except Exception:
+            deployment['status'] = 'DATABASE_SETUP_FAILED'
+            _persist_deployment(deployment)
+            raise click.ClickException('Managed database setup failed. Check network, IAM permissions and database status before retrying. Retained resources may incur charges; no credentials were printed.') from None
     infra = _provision_cluster_infrastructure(account_id, region)
+    if database_subnets:infra["subnets"] = database_subnets
     _ensure_eb_application(eb, app)
     version_label = _make_application_version_label(image_uri)
     _register_cluster_version(eb, app, version_label, image_uri, region)
@@ -836,6 +874,7 @@ def _execute_deploy(
 @click.option("--environment", "--env-name", "environment_name", help="Elastic Beanstalk environment name")
 @click.option("--region", help="AWS region (for example, us-east-2)")
 @click.option("--port", default=None, type=click.IntRange(1, 65535), help="Container port (existing saved port, otherwise 8080)")
+@click.option("--database-file", type=click.Path(exists=True,dir_okay=False), help="Reviewed managed PostgreSQL plan; creates or reuses a private database before deployment (additional charges).")
 @click.option("--release-policy", type=click.Path(exists=True,dir_okay=False), help="Reviewed JSON test commands, HTTP checks and automatic recovery policy.")
 @click.option("--commit", help="Build this full GitHub commit SHA instead of the branch head.")
 @click.option("--max-replicas", type=click.IntRange(1,100), help="Set autoscaling maximum (new environments default to 5; updates preserve bounds unless set).")
@@ -844,9 +883,14 @@ def _execute_deploy(
 @click.option("--env", "extra_env", multiple=True, metavar="KEY=VALUE", help="Application environment variable")
 @click.option("-y", "--yes", is_flag=True, help="Skip the deployment confirmation")
 @click.option('--reviewed', is_flag=True, help='Confirm that you reviewed the root Dockerfile in this ZIP.')
-def deploy(source, app, environment_name, region, port, wait, env_file, extra_env, yes, reviewed=False, max_replicas=None, commit=None, release_policy=None):
+def deploy(source, app, environment_name, region, port, wait, env_file, extra_env, yes, reviewed=False, max_replicas=None, commit=None, release_policy=None, database_file=None):
     """Deploy a GitHub URL or a reviewed local project ZIP using AWS CodeBuild."""
     source = source.strip()
+    database_plan = None
+    if database_file:
+        from ebkit.managed_database import validate_plan
+        try:database_plan = validate_plan(json.loads(Path(database_file).read_text(encoding='utf-8')))
+        except (OSError, ValueError):raise click.ClickException('Invalid managed database JSON file.') from None
     if release_policy:
         from ebkit.release import read_policy
         try:release_policy=read_policy(release_policy)
@@ -869,9 +913,10 @@ def deploy(source, app, environment_name, region, port, wait, env_file, extra_en
                     if not click.confirm('I reviewed this Dockerfile. Continue?',default=False): raise click.Abort()
                 prepared = make_zip(root,Path(directory)/'source.zip')
                 archive_name = re.sub(r'[^a-z0-9-]', '-', Path(source).stem.lower()).strip('-') or 'zip-app'
-                _execute_deploy(source_url=f'zip://source/{archive_name}',app=app,env=environment_name,region=region,port=port,wait=wait,env_file=env_file,extra_env=extra_env,is_interactive=not yes and sys.stdin.isatty(),archive_path=str(prepared),**({'release_policy':release_policy} if release_policy else {}),**({'max_replicas':max_replicas} if max_replicas is not None else {}))
+                _execute_deploy(source_url=f'zip://source/{archive_name}',app=app,env=environment_name,region=region,port=port,wait=wait,env_file=env_file,extra_env=extra_env,is_interactive=not yes and sys.stdin.isatty(),archive_path=str(prepared),**({'database_plan':database_plan} if database_plan else {}),**({'release_policy':release_policy} if release_policy else {}),**({'max_replicas':max_replicas} if max_replicas is not None else {}))
                 return
         except (ValueError, OSError, zipfile.BadZipFile, BotoCoreError, ClientError, RuntimeError, TimeoutError) as error:
+            if database_plan:raise click.ClickException('Deployment failed. Inspect AWS status and retained database resources; credentials were not printed.') from None
             raise click.ClickException(str(error)) from None
     valid, error = validate_github_url(source)
     if not valid:
@@ -881,6 +926,7 @@ def deploy(source, app, environment_name, region, port, wait, env_file, extra_en
     try:
         _execute_deploy(
             source_url=source,
+            **({"database_plan":database_plan} if database_plan else {}),
             **({"release_policy":release_policy} if release_policy else {}),
             **({"commit":commit} if commit else {}),
             app=app,
@@ -894,6 +940,7 @@ def deploy(source, app, environment_name, region, port, wait, env_file, extra_en
             **({'max_replicas':max_replicas} if max_replicas is not None else {}),
         )
     except (BotoCoreError, ClientError, RuntimeError, TimeoutError) as exc:
+        if database_plan:raise click.ClickException('Deployment failed. Inspect AWS status and retained database resources; credentials were not printed.') from None
         raise click.ClickException(str(exc)) from exc
 
 

@@ -171,11 +171,11 @@ it('hands a reviewed ZIP to the CLI without GitHub calls and reuses its owned sn
   expect((await post('/api/deploy',body)).status).toBe(400);expect(launch).not.toHaveBeenCalled();
   expect((await post('/api/deploy',{...body,reviewed:true})).status).toBe(400);expect(launch).not.toHaveBeenCalled();
   const download=await post(`/api/uploads/${uploaded.uploadId}/download`,{reviewed:true,reviewHash:draft.reviewHash});expect(download.status).toBe(200);expect(Buffer.from(await download.arrayBuffer()).subarray(0,2).toString()).toBe('PK');
-  expect((await post('/api/deploy',{...body,reviewed:true,environment:{DATABASE_URL:'test-database-secret'}})).status).toBe(202);
+  expect((await post('/api/deploy',{...body,reviewed:true,environment:{DATABASE_URL:'postgresql://user:test-database-secret@database.example/ebkit'}})).status).toBe(202);
   expect(launch.mock.calls[0][1]).toContain('--reviewed');expect(launch.mock.calls[0][1][3]).toMatch(/prepared\.zip$/);
   expect(launch.mock.calls[0][2].shell).toBe(false);expect(rows[0].repository).toBe('zip:project.zip');
   children[0].emit('close',1);await vi.waitFor(()=>expect(rows[0].operation_running).toBe(false));
-  expect(JSON.stringify(rows)).not.toContain('test-database-secret');
+  expect(JSON.stringify(rows)).not.toContain('postgresql://user:test-database-secret@database.example/ebkit');
   expect((await post(`/api/projects/${rows[0].id}/deploy`,{confirmCosts:true})).status).toBe(202);
   expect(launch.mock.calls[1][1]).toContain(rows[0].environment_name);children[1].emit('close',1);await vi.waitFor(()=>expect(rows[0].operation_running).toBe(false));
   const replacement=await(await fetch(url+'/api/uploads',{method:'POST',headers:{Authorization:'Bearer test','Content-Type':'application/zip','x-ebkit-filename':'updated.zip'},body:'new mock zip'})).json();
@@ -183,7 +183,7 @@ it('hands a reviewed ZIP to the CLI without GitHub calls and reuses its owned sn
   const updateBody={uploadId:replacement.uploadId,reviewHash:replacementDraft.reviewHash,reviewed:true,port:3000,confirmCosts:true};
   const target=rows[0].environment_name,application=rows[0].application_name;
   expect((await post(`/api/projects/${rows[0].id}/deploy`,{...updateBody,reviewed:false})).status).toBe(400);
-  expect((await post(`/api/projects/${rows[0].id}/deploy`,{...updateBody,port:8080,environment:{DATABASE_URL:'replacement-secret'}})).status).toBe(400);
+  expect((await post(`/api/projects/${rows[0].id}/deploy`,{...updateBody,port:8080,environment:{DATABASE_URL:'postgresql://user:replacement-secret@database.example/ebkit'}})).status).toBe(400);
   expect(launch).toHaveBeenCalledTimes(2);
   rows[0].status='ready';rows[0].live_url='https://existing.example.com';
   expect((await post(`/api/projects/${rows[0].id}/deploy`,updateBody)).status).toBe(202);
@@ -193,7 +193,7 @@ it('hands a reviewed ZIP to the CLI without GitHub calls and reuses its owned sn
   expect(launch.mock.calls[2][1][3]).not.toBe(launch.mock.calls[0][1][3]);
   expect(await readJSON(path.join(fixture.root,`${rows[0].id}.source.json`))).toMatchObject({uploadId:replacement.uploadId});
   children[2].emit('close',1);await vi.waitFor(()=>expect(rows[0].operation_running).toBe(false));
-  expect(JSON.stringify(rows)).not.toContain('replacement-secret');
+  expect(JSON.stringify(rows)).not.toContain('postgresql://user:replacement-secret@database.example/ebkit');
   expect(github).not.toHaveBeenCalled();
   expect((await post(`/api/projects/${rows[0].id}/status`,{sourceArchive:'C:/private.zip'})).status).toBe(400);
   await fixture.manager.removeProject(rows[0].id);
