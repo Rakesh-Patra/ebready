@@ -45,3 +45,14 @@ def test_hosted_metadata_fails_closed_when_remote_storage_is_denied(monkeypatch,
     s3.get_object.side_effect=ClientError({'Error':{'Code':'AccessDenied'}},'GetObject')
     with patch('boto3.client',return_value=s3), pytest.raises(ClientError):
         load_deployments(tmp_path/'11111111-1111-4111-8111-111111111111.json')
+
+
+def test_idle_hosted_environment_receives_verified_https_probe(monkeypatch):
+    from ebkit.commands.deploy import _poll_environment_health
+    monkeypatch.setenv('EBKIT_HOSTED_REGION','us-east-2')
+    client=MagicMock();host='sample.us-east-2.elasticbeanstalk.com'
+    client.describe_environments.side_effect=[{'Environments':[{'Status':'Ready','Health':health,'CNAME':host}]} for health in ['Grey','Green']]
+    with patch('urllib.request.urlopen') as request, patch('ebkit.commands.deploy.time.sleep'):
+        result=_poll_environment_health(client,'app','environment')
+    request.assert_called_once_with('https://'+host+'/',timeout=5)
+    assert result['health']=='Green'

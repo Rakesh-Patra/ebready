@@ -654,6 +654,16 @@ def _poll_environment_health(
             health = environment.get("Health", "Unknown")
             cname = environment.get("CNAME")
             click.echo(f"    Status={status} | Health={health}")
+            if status == "Ready" and str(health).lower() == "grey" and os.environ.get("EBKIT_HOSTED_REGION") and isinstance(cname, str) and re.fullmatch(r"[A-Za-z0-9.-]+\.elasticbeanstalk\.com", cname):
+                # Idle Cluster environments need real traffic before health can be
+                # evaluated. Probe only the AWS-returned hostname with verified TLS.
+                from urllib.request import urlopen
+                from urllib.error import URLError
+                try:
+                    with urlopen('https://' + cname + '/', timeout=5) as response:
+                        response.read(1024)
+                except (URLError, TimeoutError, OSError):
+                    pass
             if status == "Ready" and str(health).lower() != "grey":
                 return {
                     "status": status,
