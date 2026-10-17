@@ -34,7 +34,7 @@ jobs:
       - name: Install and test
         run: |
           python -m pip install '.[dev,database]'
-          python -m pytest tests/test_aws_tls.py tests/test_managed_database.py tests/test_cluster_health_poll.py tests/test_controls.py tests/test_production_ops.py -q
+          python -m pytest tests/test_aws_tls.py tests/test_managed_database.py tests/test_cluster_health_poll.py tests/test_controls.py tests/test_production_ops.py tests/test_dashboard_release.py -q
           cd web
           npm ci
           EBKIT_TEST_PYTHON="$(command -v python)" npm test -- --pool=threads --maxWorkers=1 --testTimeout=15000

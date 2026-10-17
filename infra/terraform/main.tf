@@ -167,6 +167,9 @@ resource "aws_iam_role_policy" "github" {
   name = "deploy-one-dashboard"
   role = aws_iam_role.github.id
   policy = jsonencode({ Version = "2012-10-17", Statement = [
+    # Beanstalk validates this platform bucket action even after bootstrap.
+    # No other bucket can be created and no platform bucket objects can be read.
+    { Effect = "Allow", Action = ["s3:CreateBucket"], Resource = "arn:aws:s3:::elasticbeanstalk-${var.region}-${local.account}" },
     { Effect = "Allow", Action = ["elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeEvents", "elasticbeanstalk:DescribeApplicationVersions", "elasticbeanstalk:DescribeEnvironmentHealth"], Resource = "*" },
     { Effect = "Allow", Action = ["elasticbeanstalk:CreateApplicationVersion"], Resource = [local.app_arn, "arn:aws:elasticbeanstalk:${var.region}:${local.account}:applicationversion/${var.name}/*"] },
     { Effect = "Allow", Action = ["elasticbeanstalk:UpdateEnvironment"], Resource = local.env_arn },

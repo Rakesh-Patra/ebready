@@ -13,6 +13,19 @@ from zipfile import ZipFile, ZIP_DEFLATED
 import boto3
 
 
+def wait_for_processed_version(eb, app, version, attempts=60):
+    # Live standard environments can return uppercase values despite SDK enums.
+    for _ in range(attempts):
+        row = eb.describe_application_versions(ApplicationName=app, VersionLabels=[version])['ApplicationVersions'][0]
+        status = str(row.get('Status', '')).casefold()
+        if status == 'processed':
+            return
+        if status == 'failed':
+            raise SystemExit('Release bundle processing failed; environment was not changed.')
+        time.sleep(5)
+    raise SystemExit('Release processing timed out; inspect it before retrying.')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image', required=True)
@@ -39,15 +52,7 @@ def main():
     key = f'releases/{version}.zip'
     s3.upload_file(str(bundle), bucket, key, ExtraArgs={'ServerSideEncryption': 'AES256'})
     eb.create_application_version(ApplicationName=app, VersionLabel=version, SourceBundle={'S3Bucket': bucket, 'S3Key': key}, Process=True)
-    for _ in range(60):
-        row = eb.describe_application_versions(ApplicationName=app, VersionLabels=[version])['ApplicationVersions'][0]
-        if row['Status'] == 'Processed':
-            break
-        if row['Status'] in ['Failed', 'Unprocessed']:
-            raise SystemExit('Release bundle processing failed; environment was not changed.')
-        time.sleep(5)
-    else:
-        raise SystemExit('Release processing timed out; inspect it before retrying.')
+    wait_for_processed_version(eb, app, version)
     eb.update_environment(EnvironmentName=env, VersionLabel=version)
     for _ in range(180):
         row = eb.describe_environments(ApplicationName=app, EnvironmentNames=[env])['Environments'][0]
