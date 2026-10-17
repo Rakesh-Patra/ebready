@@ -6,7 +6,8 @@ import os
 from pathlib import Path
 import re
 import time
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from urllib.parse import urljoin, urlsplit
 from zipfile import ZipFile, ZIP_DEFLATED
 
@@ -74,6 +75,15 @@ def main():
     with urlopen(asset_url, timeout=20) as response:
         assert response.status == 200
         receipt['assetStatus'] = response.status
+    receipt['publicDemoGuards'] = {}
+    for route in ['/insforge/api/auth/sessions', '/api/deploy', '/api/repository', '/api/uploads']:
+        try:
+            with urlopen(Request(url + route, method='POST'), timeout=20) as response:
+                status = response.status
+        except HTTPError as error:
+            status = error.code
+        assert status == 403, f'Public demo guard failed for {route}: {status}'
+        receipt['publicDemoGuards'][route] = status
     receipt.update(verified=True, verifiedAt=datetime.now(timezone.utc).isoformat(), url=url, awsStatus=row['Status'], awsHealth=row['Health'], httpsConfigured=False)
     receipt_file.write_text(json.dumps(receipt, indent=2))
     print(json.dumps(receipt, indent=2))

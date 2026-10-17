@@ -184,8 +184,14 @@ Only the deploy job receives `id-token: write`. It exchanges the token using
 write the release prefix in this S3 bucket, create versions for this application,
 and update this one environment. Beanstalk also requires configuration permissions
 on its exact account-and-region platform bucket even after bootstrap; these are
-scoped to that bucket and grant no access to its objects or to unrelated buckets.
-The role cannot create IAM roles, read the Gemini secret or Terraform state, or run Terraform apply.
+scoped to that bucket. Runtime object operations are limited to this environment's
+`_runtime/*` prefix. Stack reads and updates are limited to its backing
+`awseb-ENVIRONMENT_ID-stack` CloudFormation stack. Unrelated buckets, environment
+runtime objects and stacks are outside these grants.
+Read-only EC2, Auto Scaling and load balancer inventory APIs use `Resource: *`,
+as required by the platform's deployment checks. Mutating stack and runtime
+permissions remain environment-scoped. The role cannot create IAM roles, read
+the Gemini secret or Terraform state, or provision the complete Terraform stack.
 
 Repository Actions variables contain only configuration:
 
@@ -350,6 +356,9 @@ instance practice environment is not highly available.
 - [AWS Docker configuration](https://docs.aws.amazon.com/elasticbeanstalk/latest/dg/create_deploy_docker.container.console.html)
 - [AWS enhanced health API configuration](https://docs.aws.amazon.com/elasticbeanstalk/latest/dg/health-enhanced-api.html)
 - [AWS secret references in environment variables](https://docs.aws.amazon.com/elasticbeanstalk/latest/dg/AWSHowTo.secrets.env-vars.html)
+- [AWS Standard application-version processing](https://docs.aws.amazon.com/elasticbeanstalk/latest/api/API_CreateApplicationVersion.html)
+- [AWS Beanstalk platform bucket permissions](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AdministratorAccess-AWSElasticBeanstalk.html)
+- [AWS S3 blocking SSE-C encryption](https://docs.aws.amazon.com/AmazonS3/latest/userguide/blocking-unblocking-s3-c-encryption-gpb.html)
 - [GitHub OIDC with AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws)
 - [GitHub deployment environments](https://docs.github.com/en/actions/concepts/workflows-and-actions/deployment-environments)
 - [Terraform Elastic Beanstalk environment resource](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/elastic_beanstalk_environment)
@@ -375,12 +384,23 @@ application-version request exposed that bootstrap prerequisite.
 
 Beanstalk version events exposed missing permissions on its regional platform
 bucket. The delivery policy now permits the required configuration operations
-on that exact bucket and source reads only beneath the release prefix. Optional
+on that exact bucket, runtime-object reads/writes beneath this environment's
+`resources/environments/ENVIRONMENT_ID/_runtime/*` prefix, and source reads only
+beneath the custom release prefix. It does not grant access to other environments.
+Optional
 application-version pre-processing is disabled for the Dockerrun-only Standard
 bundle; AWS documents that this step validates env.yaml and .ebextensions rather
 than Docker configuration. Six regression cases check the Standard API contract
 and reject failed versions regardless of status capitalization. Build, security
 scanning and post-deployment Ready/Green checks remain required.
+
+The verified CI run for commit `a001a930c4a351897db512ae18bf988f3e4f3292`
+passed 224 web tests and 58 targeted Python tests. The configured Trivy source and
+image gates reported zero vulnerabilities and zero secret findings; this is scoped
+to those scanners, severities and fixed-vulnerability settings, not a claim of
+zero security risk. The SBOM is preserved alongside the reports. S3's existing
+SSE-C encryption block is explicitly declared in Terraform to preserve the AWS
+security default and avoid repeated drift.
 
 The final results for today's deployment are appended here after verification.
 Until that happens, infrastructure and workflow files are implementation evidence,

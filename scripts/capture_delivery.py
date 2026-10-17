@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 import html
 import json
+import os
 from pathlib import Path
 import re
 
@@ -18,7 +19,8 @@ def main():
     output = root / 'devops-document'; output.mkdir(exist_ok=True)
     shots = []
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
+        executable = os.environ.get('EBKIT_CHROMIUM_EXECUTABLE')
+        browser = playwright.chromium.launch(**({'executable_path': executable} if executable else {}))
         page = browser.new_page(viewport={'width': 1440, 'height': 1000}, device_scale_factor=1)
         page.goto(receipt['url'], wait_until='networkidle')
         page.get_by_role('button', name='Explore demo', exact=True).wait_for()
@@ -36,6 +38,13 @@ def main():
         page.screenshot(path=str(output / '04-health-response.png'), full_page=True)
         shots.append(('04-health-response.png', 'Health response from the deployed API'))
         assert page.request.get(receipt['url'] + '/insforge/api/auth/sessions').status == 403
+        if os.environ.get('EBKIT_CAPTURE_GITHUB') == 'true':
+            page.set_viewport_size({'width': 1440, 'height': 1000})
+            response = page.goto(receipt['runUrl'], wait_until='networkidle')
+            if not response or response.status != 200:
+                raise RuntimeError('The public workflow page could not be captured.')
+            page.screenshot(path=str(output / '05-github-actions.png'), full_page=True)
+            shots.append(('05-github-actions.png', 'Actual public GitHub Actions run; see the linked run for individual steps'))
         guide = Path('docs/DEVOPS-HACKATHON-GUIDE.md').read_text(encoding='utf-8')
         content = markdown.markdown(guide, extensions=['fenced_code'])
         # The architecture is readable as text when no Mermaid renderer is available.
@@ -59,7 +68,7 @@ def main():
     previews = output / 'qa'; previews.mkdir(exist_ok=True)
     for index in range(len(pdf)):
         pdf[index].render(scale=1.2).to_pil().save(previews / f'page-{index+1}.png')
-    print(f'Captured four real deployed screenshots and a {len(pdf)} page PDF. Review all QA page images before sharing.')
+    print(f'Captured {len(shots)} real screenshots and a {len(pdf)} page PDF. Review all QA page images before sharing.')
 
 
 if __name__ == '__main__':

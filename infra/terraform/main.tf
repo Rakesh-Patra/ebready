@@ -23,7 +23,8 @@ resource "aws_s3_bucket_public_access_block" "releases" {
 resource "aws_s3_bucket_server_side_encryption_configuration" "releases" {
   bucket = aws_s3_bucket.releases.id
   rule {
-    bucket_key_enabled = false
+    bucket_key_enabled       = false
+    blocked_encryption_types = ["SSE-C"]
     apply_server_side_encryption_by_default { sse_algorithm = "AES256" }
   }
 }
@@ -168,8 +169,12 @@ resource "aws_iam_role_policy" "github" {
   role = aws_iam_role.github.id
   policy = jsonencode({ Version = "2012-10-17", Statement = [
     # Required Beanstalk platform-bucket configuration, scoped to one account/region.
-    # No unrelated bucket or platform-bucket object access is granted.
-    { Effect = "Allow", Action = ["s3:CreateBucket", "s3:GetBucketLocation", "s3:GetBucketAcl", "s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:PutBucketOwnershipControls", "s3:PutBucketPublicAccessBlock"], Resource = "arn:aws:s3:::elasticbeanstalk-${var.region}-${local.account}" },
+    # No unrelated bucket access is granted; runtime objects belong to this environment.
+    { Effect = "Allow", Action = ["s3:CreateBucket", "s3:ListBucket", "s3:GetBucketLocation", "s3:GetBucketAcl", "s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:PutBucketOwnershipControls", "s3:PutBucketPublicAccessBlock"], Resource = "arn:aws:s3:::elasticbeanstalk-${var.region}-${local.account}" },
+    { Effect = "Allow", Action = ["s3:Get*", "s3:Put*", "s3:DeleteObject"], Resource = "arn:aws:s3:::elasticbeanstalk-${var.region}-${local.account}/resources/environments/${aws_elastic_beanstalk_environment.app.id}/_runtime/*" },
+    { Effect = "Allow", Action = ["cloudformation:Get*", "cloudformation:Describe*", "cloudformation:UpdateStack"], Resource = "arn:aws:cloudformation:${var.region}:${local.account}:stack/awseb-${aws_elastic_beanstalk_environment.app.id}-stack/*" },
+    # These AWS inventory APIs do not support per-environment resource scoping.
+    { Effect = "Allow", Action = ["autoscaling:Describe*", "ec2:Describe*", "elasticloadbalancing:Describe*"], Resource = "*" },
     { Effect = "Allow", Action = ["elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeEvents", "elasticbeanstalk:DescribeApplicationVersions", "elasticbeanstalk:DescribeEnvironmentHealth"], Resource = "*" },
     { Effect = "Allow", Action = ["elasticbeanstalk:CreateApplicationVersion"], Resource = [local.app_arn, "arn:aws:elasticbeanstalk:${var.region}:${local.account}:applicationversion/${var.name}/*"] },
     { Effect = "Allow", Action = ["elasticbeanstalk:UpdateEnvironment"], Resource = local.env_arn },

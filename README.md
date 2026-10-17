@@ -10,6 +10,12 @@ EBKit generates and checks Docker deployment kits and manages AWS Elastic Beanst
 
 **Start here:** [Features explained simply](docs/FEATURES.md) | [CLI guide](docs/CLI.md) | [Web guide](web/README.md) | [Database, monitoring and cost tools](docs/OPERATIONS.md) | [Initialization](docs/initialization.md)
 
+For hosting this dashboard on Standard Elastic Beanstalk with the root Dockerfile,
+Terraform, GitHub OIDC, Secrets Manager and CloudWatch, follow the
+[DevOps implementation and deployment walkthrough](docs/DEVOPS-HACKATHON-GUIDE.md).
+Its public demo disables login and cloud/AI operations until HTTPS is configured.
+This hosting setup is separate from the customer Cluster Mode deployment engine.
+
 Automated tests cover local behavior and mocked AWS integrations. Live AWS integration tests are still required. AWS resources incur charges; external databases and snapshots persist independently of environment teardown. Cost reports explicitly identify attribution limits.
 
 ---
