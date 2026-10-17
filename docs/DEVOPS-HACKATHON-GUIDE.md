@@ -182,7 +182,10 @@ without a cloud identity and cannot execute the deployment job.
 Only the deploy job receives `id-token: write`. It exchanges the token using
 `aws-actions/configure-aws-credentials`. Its role can push to this ECR repository,
 write the release prefix in this S3 bucket, create versions for this application,
-and update this one environment. It cannot create IAM roles or run Terraform apply.
+and update this one environment. Beanstalk also requires configuration permissions
+on its exact account-and-region platform bucket even after bootstrap; these are
+scoped to that bucket and grant no access to its objects or to unrelated buckets.
+The role cannot create IAM roles, read the Gemini secret or Terraform state, or run Terraform apply.
 
 Repository Actions variables contain only configuration:
 
@@ -206,6 +209,10 @@ prints that credential. Do not paste a GitHub token into the script or this guid
 - Public app settings: normal environment variables; no secrets are required for guest demo mode.
 - Server secrets: the existing Gemini and InsForge administration keys are stored in AWS Secrets Manager; only their ARNs are passed through `secret_arns`. No secret values are committed or placed in Terraform state.
 - Instance permission: `secretsmanager:GetSecretValue` is limited to those exact ARNs. Customer-managed KMS keys also require a reviewed `kms:Decrypt` grant.
+- Future database passwords and connection URLs: use Secrets Manager references, scoped to the backend or workload that needs them.
+- Future webhook signing secrets or private integration tokens: store them in Secrets Manager and verify signatures; do not expose them through the UI.
+- TLS private keys: use ACM-managed certificates rather than committing certificate/key files.
+- GitHub authentication for operator setup: stays in Git Credential Manager on the operator machine, not in the image or the repository.
 - React settings: anything named `VITE_*` is browser-visible. Never place passwords, admin keys or cloud credentials there.
 - Artifacts: the release ZIP contains only `Dockerrun.aws.json`. The scanned Docker image contains application source and runtime dependencies, not local environment files.
 
@@ -236,7 +243,8 @@ pushes a unique immutable image tag and reads its digest. The release script
 validates that digest and writes a versioned Dockerrun bundle. It uploads that
 bundle over TLS to private S3 and creates an Elastic Beanstalk application version.
 
-`scripts/release_dashboard.py` waits for bundle processing, updates the named
+`scripts/release_dashboard.py` creates a Standard application version without
+optional pre-processing (this bundle contains only Dockerrun), updates the named
 environment and waits for Ready/Green on the requested version. It records the
 previous version before making the update. Terraform intentionally ignores
 `version_label` drift so infrastructure ownership and application delivery do
@@ -358,9 +366,21 @@ CloudWatch provisioning completed with four new monitoring resources and three
 configuration updates. The Gemini and InsForge administration keys were stored
 in AWS Secrets Manager; their values were not printed, committed or passed to
 Terraform. The image remediation subsequently passed the security gate. OIDC role assumption
-then succeeded after the immutable subject was configured. Beanstalk's standard
+then succeeded after the immutable subject was configured. A policy simulation
+confirmed that the delivery role cannot read the Gemini key or Terraform state,
+cannot create unrelated buckets, and can publish its own application image. S3
+metadata confirmed AES256 encryption and versioning for remote state. Beanstalk's standard
 regional storage bucket was initialized with the operator profile after its first
 application-version request exposed that bootstrap prerequisite.
+
+Beanstalk version events exposed missing permissions on its regional platform
+bucket. The delivery policy now permits the required configuration operations
+on that exact bucket and source reads only beneath the release prefix. Optional
+application-version pre-processing is disabled for the Dockerrun-only Standard
+bundle; AWS documents that this step validates env.yaml and .ebextensions rather
+than Docker configuration. Six regression cases check the Standard API contract
+and reject failed versions regardless of status capitalization. Build, security
+scanning and post-deployment Ready/Green checks remain required.
 
 The final results for today's deployment are appended here after verification.
 Until that happens, infrastructure and workflow files are implementation evidence,

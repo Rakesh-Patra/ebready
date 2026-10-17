@@ -167,13 +167,13 @@ resource "aws_iam_role_policy" "github" {
   name = "deploy-one-dashboard"
   role = aws_iam_role.github.id
   policy = jsonencode({ Version = "2012-10-17", Statement = [
-    # Beanstalk validates this platform bucket action even after bootstrap.
-    # No other bucket can be created and no platform bucket objects can be read.
-    { Effect = "Allow", Action = ["s3:CreateBucket"], Resource = "arn:aws:s3:::elasticbeanstalk-${var.region}-${local.account}" },
+    # Required Beanstalk platform-bucket configuration, scoped to one account/region.
+    # No unrelated bucket or platform-bucket object access is granted.
+    { Effect = "Allow", Action = ["s3:CreateBucket", "s3:GetBucketLocation", "s3:GetBucketAcl", "s3:GetBucketPolicy", "s3:PutBucketPolicy", "s3:PutBucketOwnershipControls", "s3:PutBucketPublicAccessBlock"], Resource = "arn:aws:s3:::elasticbeanstalk-${var.region}-${local.account}" },
     { Effect = "Allow", Action = ["elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeEvents", "elasticbeanstalk:DescribeApplicationVersions", "elasticbeanstalk:DescribeEnvironmentHealth"], Resource = "*" },
     { Effect = "Allow", Action = ["elasticbeanstalk:CreateApplicationVersion"], Resource = [local.app_arn, "arn:aws:elasticbeanstalk:${var.region}:${local.account}:applicationversion/${var.name}/*"] },
     { Effect = "Allow", Action = ["elasticbeanstalk:UpdateEnvironment"], Resource = local.env_arn },
-    { Effect = "Allow", Action = ["s3:PutObject", "s3:GetObject"], Resource = "${aws_s3_bucket.releases.arn}/releases/*" },
+    { Effect = "Allow", Action = ["s3:PutObject", "s3:Get*"], Resource = "${aws_s3_bucket.releases.arn}/releases/*" },
     { Effect = "Allow", Action = ["s3:ListBucket", "s3:GetBucketLocation"], Resource = aws_s3_bucket.releases.arn },
     { Effect = "Allow", Action = ["ecr:GetAuthorizationToken"], Resource = "*" },
     { Effect = "Allow", Action = ["ecr:BatchCheckLayerAvailability", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart", "ecr:CompleteLayerUpload", "ecr:PutImage", "ecr:DescribeImages"], Resource = aws_ecr_repository.app.arn }

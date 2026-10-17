@@ -13,17 +13,14 @@ from zipfile import ZipFile, ZIP_DEFLATED
 import boto3
 
 
-def wait_for_processed_version(eb, app, version, attempts=60):
-    # Live standard environments can return uppercase values despite SDK enums.
-    for _ in range(attempts):
-        row = eb.describe_application_versions(ApplicationName=app, VersionLabels=[version])['ApplicationVersions'][0]
-        status = str(row.get('Status', '')).casefold()
-        if status == 'processed':
-            return
-        if status == 'failed':
-            raise SystemExit('Release bundle processing failed; environment was not changed.')
-        time.sleep(5)
-    raise SystemExit('Release processing timed out; inspect it before retrying.')
+def create_standard_version(eb, app, version, bucket, key):
+    # A Dockerrun-only bundle has no env.yaml or .ebextensions to pre-process.
+    # Standard deployment validates it on the instance; build/scan gates ran in CI.
+    result = eb.create_application_version(ApplicationName=app, VersionLabel=version,
+        SourceBundle={'S3Bucket': bucket, 'S3Key': key}, Process=False)
+    status = str(result.get('ApplicationVersion', {}).get('Status', '')).casefold()
+    if status == 'failed':
+        raise SystemExit('Standard application version was rejected; environment was not changed.')
 
 
 def main():
@@ -51,8 +48,7 @@ def main():
         archive.writestr('Dockerrun.aws.json', json.dumps({'AWSEBDockerrunVersion': '1', 'Image': {'Name': args.image, 'Update': 'true'}, 'Ports': [{'ContainerPort': '8080'}]}))
     key = f'releases/{version}.zip'
     s3.upload_file(str(bundle), bucket, key, ExtraArgs={'ServerSideEncryption': 'AES256'})
-    eb.create_application_version(ApplicationName=app, VersionLabel=version, SourceBundle={'S3Bucket': bucket, 'S3Key': key}, Process=True)
-    wait_for_processed_version(eb, app, version)
+    create_standard_version(eb, app, version, bucket, key)
     eb.update_environment(EnvironmentName=env, VersionLabel=version)
     for _ in range(180):
         row = eb.describe_environments(ApplicationName=app, EnvironmentNames=[env])['Environments'][0]
