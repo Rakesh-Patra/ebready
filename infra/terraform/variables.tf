@@ -14,6 +14,11 @@ variable "github_environment" {
   type    = string
   default = "production"
 }
+variable "github_subject_prefix" {
+  type        = string
+  default     = ""
+  description = "Exact sub_claim_prefix returned by GitHub's OIDC customization API, including immutable repository IDs when enabled."
+}
 variable "solution_stack" {
   type        = string
   description = "A reviewed current Amazon Linux 2023 Docker platform returned by AWS."

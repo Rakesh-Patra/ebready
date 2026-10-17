@@ -326,6 +326,7 @@ export async function createWorker(config, dependencies = {}) {
     try {
       const route = new URL(req.url, 'http://localhost').pathname;
       if (config.publicDemo && (route === '/insforge' || route.startsWith('/insforge/'))) return reply(403, { error: 'Authentication is disabled on this public demo until HTTPS is configured.' });
+      if (config.publicDemo && (route === '/api' || route.startsWith('/api/')) && route !== '/api/health') return reply(403, { error: 'Cloud and AI actions are disabled on this public demonstration.' });
       if (config.staticRoot && await serveDashboard(req, res, config.staticRoot, { baseUrl: config.baseUrl, anonKey: config.anonKey, publicDemo: config.publicDemo })) return;
       if (req.method === 'GET' && route === '/api/health') return reply(200, { liveEnabled: !!(config.liveEnabled && admin && config.allowedEmails.length), awsCallsDuringStartup: false, recoveringJobs: running.size });
       const origin = req.headers.origin;

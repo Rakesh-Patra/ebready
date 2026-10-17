@@ -14,7 +14,7 @@ separate from the AWS Cluster Mode environments that EBKit can manage for users.
 The aim is to demonstrate decisions, automation, security, validation and recovery.
 Using more tools is not the goal. Ansible is unnecessary because Beanstalk manages
 the host. A separate Prometheus or Grafana deployment is unnecessary for this demo;
-enhanced Beanstalk health and seven days of application/platform logs are enough.
+CloudWatch dashboard, enhanced Beanstalk health, CPU and health alarms, and seven days of application/platform logs provide the requested baseline.
 
 ## What each tool does
 
@@ -133,7 +133,7 @@ unless you have recorded it separately.
 ## Step 5 Define infrastructure in Terraform
 
 Configuration lives under `infra/terraform`. The stack creates a single-instance
-practice environment, private encrypted release bucket, immutable ECR repository,
+practice environment, CloudWatch dashboard and alarms, private encrypted release bucket, immutable ECR repository,
 instance profile, Beanstalk health role and GitHub deployment role. The existing
 GitHub OIDC identity provider is read rather than recreated.
 
@@ -148,13 +148,15 @@ terraform '-chdir=infra/terraform' apply deployment.tfplan
 
 The initial reviewed plan had 16 creations and no changes or deletions to existing
 resources. Keep the lock file under version control. The local state and input
-files are ignored; move the state to an access-restricted, encrypted remote backend
-with locking before team use. Do not pass secret values into Terraform variables.
+files are ignored. State was migrated to the private encrypted, versioned S3
+release bucket under `terraform/dashboard.tfstate`, with native S3 state locking.
+The GitHub application delivery role can access `releases/*`, not the state prefix. Do not pass secret values into Terraform variables.
 
 A real troubleshooting event occurred during bootstrap: the newest AWS provider
 used an S3 Control endpoint that failed DNS resolution. Some resources had already
-been created. The recovery is to inspect saved state, pin the compatible provider,
-review the refreshed plan and resume. Never blindly recreate resources after a
+been created. The recovery was to inspect saved state, pin AWS provider 6.26.0,
+verify and retain the newly created empty bucket, review a plan with no deletions,
+and resume. The resumed apply created the remaining seven resources successfully. Never blindly recreate resources after a
 partial apply.
 
 ## Step 6 Set up GitHub OIDC securely
@@ -163,8 +165,14 @@ The trust policy requires both:
 
 ```text
 aud = sts.amazonaws.com
-sub = repo:Rakesh-Patra/ebready:environment:production
+sub = repo:Rakesh-Patra@147680316/ebready@1407395996:environment:production
 ```
+
+GitHub's OIDC customization API reported immutable subjects for this repository.
+The exact `sub_claim_prefix` includes owner and repository IDs. An initial trust
+policy using only repository names was rejected; it was corrected to the exact
+immutable prefix rather than weakening the policy with a wildcard. Other
+repositories must query their own prefix instead of copying these IDs.
 
 The production GitHub environment restricts deployment branches to the feature
 branch used for today's demonstration and `main`. The workflow additionally
@@ -189,14 +197,14 @@ DEPLOYMENT_BRANCH
 ```
 
 `scripts/github_delivery.py configure` sets these variables and the branch policy
-using an existing Git Credential Manager credential in memory. It never writes or
+using an existing Git Credential Manager credential in memory. It also reads the exact OIDC subject prefix into the ignored local Terraform input; apply that trust update before running delivery. It never writes or
 prints that credential. Do not paste a GitHub token into the script or this guide.
 
 ## Step 7 Keep secrets in the right place
 
 - AWS delivery credentials: generated temporarily through OIDC, not GitHub secrets.
 - Public app settings: normal environment variables; no secrets are required for guest demo mode.
-- Future server secrets: create the value outside Terraform in AWS Secrets Manager; pass only its ARN through `secret_arns`.
+- Server secrets: the existing Gemini and InsForge administration keys are stored in AWS Secrets Manager; only their ARNs are passed through `secret_arns`. No secret values are committed or placed in Terraform state.
 - Instance permission: `secretsmanager:GetSecretValue` is limited to those exact ARNs. Customer-managed KMS keys also require a reviewed `kms:Decrypt` grant.
 - React settings: anything named `VITE_*` is browser-visible. Never place passwords, admin keys or cloud credentials there.
 - Artifacts: the release ZIP contains only `Dockerrun.aws.json`. The scanned Docker image contains application source and runtime dependencies, not local environment files.
@@ -251,6 +259,19 @@ previous version, endpoint, health and smoke results. A successful Terraform app
 alone is not proof that the EBKit application was deployed: the initial Beanstalk
 sample application may be running before the first release job.
 
+## CloudWatch observability
+
+The `infra/terraform/observability.tf` stack defines a CloudWatch dashboard with
+Beanstalk enhanced health, EC2 CPU, and network traffic. Two alarms monitor
+unhealthy environment states and sustained CPU above 80 percent. An error query
+helps find failures in application/platform logs. Beanstalk streams instance logs
+and retains them for seven days.
+
+The alarms are visible in CloudWatch but have no email or paging subscription
+configured yet. Missing metrics are treated as missing, not as proof of healthy
+operation. Memory usage and distributed traces require additional instrumentation;
+they are not included in this baseline. No separate monitoring server is needed.
+
 ## Step 11 Demonstrate recovery
 
 For a failed release, inspect Beanstalk Events, enhanced health and CloudWatch logs.
@@ -293,6 +314,11 @@ Show the deployment receipt and a health check. Finish by explaining the previou
 version rollback and the cleanup process. Present unfinished HTTPS or protection
 work as a limitation rather than claiming production readiness.
 
+The root Dockerfile now defaults to public demo mode. While HTTPS is missing,
+the server rejects authentication and cloud/AI API calls; only health checks and
+the browser-local simulation remain available. This prevents visitors from
+spending the operator's AWS or Gemini budget through the public demonstration.
+
 Suggested demonstration order: application idea, source branch, CI results,
 security report, Terraform plan, OIDC trust, ECR digest, live release, health,
 recovery and cost controls. This gives a coherent story rather than a list of tools.
@@ -307,7 +333,7 @@ and are not owned or deleted by this stack.
 
 Before production: configure domain and ACM-backed HTTPS, deliberately re-enable
 authentication, review allowed origins, use a scoped server execution model for
-customer AWS work, add an encrypted remote Terraform backend, define service
+customer AWS work, review the already encrypted remote Terraform backend, define service
 objectives, and choose resilience appropriate to the application. A single
 instance practice environment is not highly available.
 
@@ -321,6 +347,20 @@ instance practice environment is not highly available.
 - [Terraform Elastic Beanstalk environment resource](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/elastic_beanstalk_environment)
 
 ## Execution evidence
+
+Bootstrap completed with the standard Amazon Linux 2023 Docker environment.
+The first pipeline correctly blocked delivery because the image included vulnerable
+global npm tooling and Python setuptools 66.1.1. The Dockerfile was changed to
+remove package managers from the final runtime and upgrade setuptools. A fresh
+pipeline must confirm the remediation before the application release is accepted.
+
+CloudWatch provisioning completed with four new monitoring resources and three
+configuration updates. The Gemini and InsForge administration keys were stored
+in AWS Secrets Manager; their values were not printed, committed or passed to
+Terraform. The image remediation subsequently passed the security gate. OIDC role assumption
+then succeeded after the immutable subject was configured. Beanstalk's standard
+regional storage bucket was initialized with the operator profile after its first
+application-version request exposed that bootstrap prerequisite.
 
 The final results for today's deployment are appended here after verification.
 Until that happens, infrastructure and workflow files are implementation evidence,

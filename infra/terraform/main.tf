@@ -3,9 +3,10 @@ data "aws_iam_openid_connect_provider" "github" {
   url = "https://token.actions.githubusercontent.com"
 }
 locals {
-  account = data.aws_caller_identity.current.account_id
-  app_arn = "arn:aws:elasticbeanstalk:${var.region}:${local.account}:application/${var.name}"
-  env_arn = "arn:aws:elasticbeanstalk:${var.region}:${local.account}:environment/${var.name}/${var.name}"
+  account               = data.aws_caller_identity.current.account_id
+  app_arn               = "arn:aws:elasticbeanstalk:${var.region}:${local.account}:application/${var.name}"
+  env_arn               = "arn:aws:elasticbeanstalk:${var.region}:${local.account}:environment/${var.name}/${var.name}"
+  github_subject_prefix = var.github_subject_prefix != "" ? var.github_subject_prefix : "repo:${var.repository}"
 }
 
 resource "aws_s3_bucket" "releases" {
@@ -22,6 +23,7 @@ resource "aws_s3_bucket_public_access_block" "releases" {
 resource "aws_s3_bucket_server_side_encryption_configuration" "releases" {
   bucket = aws_s3_bucket.releases.id
   rule {
+    bucket_key_enabled = false
     apply_server_side_encryption_by_default { sse_algorithm = "AES256" }
   }
 }
@@ -157,7 +159,7 @@ resource "aws_iam_role" "github" {
     Effect = "Allow", Principal = { Federated = data.aws_iam_openid_connect_provider.github.arn },
     Action = "sts:AssumeRoleWithWebIdentity", Condition = { StringEquals = {
       "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com",
-      "token.actions.githubusercontent.com:sub" = "repo:${var.repository}:environment:${var.github_environment}"
+      "token.actions.githubusercontent.com:sub" = "${local.github_subject_prefix}:environment:${var.github_environment}"
     } }
   }] })
 }

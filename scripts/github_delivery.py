@@ -61,6 +61,13 @@ def main():
         print(json.dumps([{key: row.get(key) for key in ['id', 'name', 'head_sha', 'status', 'conclusion', 'html_url']}
                           for row in result['workflow_runs']], indent=2))
     else:
+        subject = api('GET', base + '/actions/oidc/customization/sub')
+        prefix = subject.get('sub_claim_prefix')
+        if prefix:
+            config_path = ROOT / 'infra/terraform/deployment.tfvars.json'
+            config = json.loads(config_path.read_text(encoding='utf-8-sig'))
+            config['github_subject_prefix'] = prefix
+            config_path.write_text(json.dumps(config, indent=2), encoding='utf-8')
         output = json.loads((ROOT / 'artifacts/devops/terraform-outputs.json').read_text(encoding='utf-8-sig'))
         values = {'AWS_REGION': 'us-east-2', 'AWS_ROLE_ARN': output['github_role_arn']['value'],
                   'EB_ARTIFACT_BUCKET': output['artifact_bucket']['value'],
