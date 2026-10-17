@@ -1,5 +1,7 @@
+import {validateSettings,databaseRegions,databasePlan} from './database.mjs';
 import { discoverEnvironment, requireEnvironment } from './environment.mjs';
 import { createServer } from 'node:http';
+import { serveDashboard } from './static.mjs';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, writeFile, readFile } from 'node:fs/promises';
@@ -10,6 +12,7 @@ import { atomicJSON, readJSON, pendingJobs, lockJobs, alive, removeJobDirectory 
 import { createUploads } from './uploads.mjs';
 import {createTrials,isTimedPlan,trialColumns} from './trials.mjs';
 import {createGithubDeploys} from './github-deploys.mjs';
+import { proxyInsforge } from './insforge-proxy.mjs';
 
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -175,6 +178,7 @@ export async function createWorker(config, dependencies = {}) {
       }
       await mkdir(directoryRoot, { recursive: true, mode: 0o700 });
       directory = await mkdtemp(path.join(directoryRoot, 'operation-'));
+      if(operation==='deploy'){const file=path.join(directoryRoot,`${project.id}.database.json`);if(body.managedDatabase)await atomicJSON(file,body.managedDatabase);else body.managedDatabase=await readJSON(file).catch(()=>null);if(body.managedDatabase){const planFile=path.join(directory,'database.json');await writeFile(planFile,JSON.stringify(body.managedDatabase),{mode:0o600});args.push('--database-file',planFile);}}
       if(body.configuration){const file=path.join(directory,'operation.json');await writeFile(file,JSON.stringify(body.configuration),{mode:0o600});args.push('--file',file);}
       if(body.releasePolicy){const file=path.join(directory,'release.json');await writeFile(file,JSON.stringify(body.releasePolicy),{mode:0o600});args.push('--release-policy',file);}
       if(body.options){const file=path.join(directory,'options.json');await writeFile(file,JSON.stringify(body.options),{mode:0o600});args.push('--file',file);secrets.push(...body.options.map(item=>item.Value));}
@@ -321,9 +325,11 @@ export async function createWorker(config, dependencies = {}) {
     const reply = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); };
     try {
       const route = new URL(req.url, 'http://localhost').pathname;
+      if (config.staticRoot && await serveDashboard(req, res, config.staticRoot, { baseUrl: config.baseUrl, anonKey: config.anonKey })) return;
       if (req.method === 'GET' && route === '/api/health') return reply(200, { liveEnabled: !!(config.liveEnabled && admin && config.allowedEmails.length), awsCallsDuringStartup: false, recoveringJobs: running.size });
       const origin = req.headers.origin;
       if (origin && !config.origins.includes(origin)) throw new HttpError(403, 'Request origin is not allowed.');
+      if (route.startsWith('/insforge/')) return await proxyInsforge(req, res, config.baseUrl);
       if (req.method !== 'POST') throw new HttpError(405, 'POST required.');
       if (route === '/api/uploads') {
         const user = await authorized(req);
@@ -333,7 +339,9 @@ export async function createWorker(config, dependencies = {}) {
       let raw = ''; for await (const chunk of req) { raw += chunk; if (Buffer.byteLength(raw) > 65536) throw new HttpError(413, 'Request is too large.'); }
       let body; try { body = JSON.parse(raw || '{}'); } catch { throw new HttpError(400, 'Invalid JSON.'); }
       if (route === '/api/repository') return reply(200, await validateRepository(body.repository, dependencies.fetch));
+      if(!body||typeof body!=='object'||Array.isArray(body))throw new HttpError(400,'Request must be a JSON object.');
       const user = await authorized(req);
+      if ('managedDatabase' in body)throw new HttpError(400,'Managed database plans are configured by the operator.');
       if ('sourceArchive' in body) throw new HttpError(400,'Local source paths cannot be submitted through the API.');
       if(route==='/api/repository/import')return reply(200,await uploads.importGithub(user,body.repository));
       const uploadRoute = route.match(/^\/api\/uploads\/([0-9a-f-]+)\/(prepare|download|doctor)$/i);
@@ -347,7 +355,7 @@ export async function createWorker(config, dependencies = {}) {
         return res.end(data);
       }
       if(route==='/api/profiles')return reply(200,{profiles:config.awsAccountId?config.awsProfiles??[]:[]});
-      if(route==='/api/trial')return reply(200,trials?await trials.account(user):{approved:true,trialUsed:false,durationMinutes:30,paidTestAvailable:false,paidTestDurationMinutes:120});
+      if(route==='/api/trial')return reply(200,{...(trials?await trials.account(user):{approved:true,trialUsed:false,durationMinutes:null,paidTestAvailable:false,paidTestDurationMinutes:120}),managedDatabaseRegions:databaseRegions(config,user)});
       if (route === '/api/deploy') {
         if (body.confirmCosts !== true) throw new HttpError(400, 'Confirm that AWS resources incur charges.');
         if(body.testPaidPass===true&&!(config.paidTestEmails??[]).includes(user.email?.toLowerCase()))throw new HttpError(403,'The two-hour test pass is not enabled for this account.');
@@ -362,7 +370,11 @@ export async function createWorker(config, dependencies = {}) {
           const { inspectEnvironment } = await import('./environment.mjs');
           return { repository: `zip:${zipItem.record.name}`, environment: inspectEnvironment(inspected.files) };
         })() : await validateRepository(body.repository, dependencies.fetch);
-        const missing = requireEnvironment(repository.environment, body.environment);
+        validateSettings(body.environment??{});
+        body.managedDatabase=databasePlan(body.database,repository.environment,body.environment??{},config,user,body.region);
+        if(body.managedDatabase&&body.testPaidPass===true)throw new HttpError(403,'Persistent database creation is unavailable on timed passes.');
+        const supplied=new Set(body.managedDatabase?.variables??[]);
+        const missing = requireEnvironment(repository.environment.filter(item=>!supplied.has(item.name)), body.environment);
         if (missing.length) throw new HttpError(400, `Fill in required environment settings: ${missing.join(', ')}.`);
         if (!/^[a-z][a-z0-9-]{1,39}$/.test(body.name) || !['us-east-1','us-east-2','us-west-2','ap-south-1'].includes(body.region) || !Number.isInteger(body.port) || body.port < 1 || body.port > 65535) throw new HttpError(400, 'Invalid project name, region or port.');
         const { data: existing, error: quotaError } = await admin.database.from('ebkit_web_projects').select('id').eq('user_id', user.id).eq('mode','live').neq('status','destroyed').limit(11);
@@ -370,11 +382,12 @@ export async function createWorker(config, dependencies = {}) {
         if (!(config.evaluatorEmails??[]).includes(user.email?.toLowerCase()) && existing.length >= ([...(config.testingEmails??[]),...(config.evaluatorEmails??[])].includes(user.email?.toLowerCase())?10:3)) throw new HttpError(429, 'Destroy an existing live project before creating another.');
         if (running.size) throw new HttpError(409,'Another cloud operation is running.');
         const id = randomUUID(); const application = `ebk-${id.replaceAll('-','').slice(0,16)}`;
-        let project = { id, user_id: user.id, name: body.name, repository: repository.repository, region: body.region, port: body.port, mode: 'live', status: 'deploying', stage: 1, replicas: 1, revision: 1, variable_names: Object.keys(body.environment ?? {}), application_name: application, environment_name: `${application}-cluster` };
+        let project = { id, user_id: user.id, name: body.name, repository: repository.repository, region: body.region, port: body.port, mode: 'live', status: 'deploying', stage: 1, replicas: 1, revision: 1, variable_names: [...new Set([...Object.keys(body.environment ?? {}),...(body.managedDatabase?.variables??[])])], application_name: application, environment_name: `${application}-cluster` };
         let data;
         if(trials){project=await trials.reserve(project,user,{paidTest:body.testPaidPass===true});data=[project];}
         else{const result=await admin.database.from('ebkit_web_projects').insert([project]).select('*');if(result.error)throw new HttpError(503,'Could not save deployment.');data=result.data;}
         try {
+          if(body.managedDatabase&&isTimedPlan(project.plan))throw new HttpError(403,'Persistent database creation is unavailable on timed passes.');
           if (zipItem) {
             body.sourceArchive = await uploads.archive(zipItem);
             zipItem.record.projectId = id;
@@ -389,6 +402,8 @@ export async function createWorker(config, dependencies = {}) {
       if (!match) throw new HttpError(404, 'Endpoint not found.');
       const project = await own(match[1], user);
       const operation=match[2];
+      if(body.database?.mode==='managed')throw new HttpError(400,'Managed database creation is selected before the first deployment. Existing projects reuse their saved plan.');
+      if(body.environment)validateSettings(body.environment);
       if(operation==='production'){
         const reads=['metrics','cost','leftovers','database-status','database-check','pipeline'];
         const elevated=[...(config.testingEmails??[]),...(config.evaluatorEmails??[]),...(project.plan==='paid_test'?(config.paidTestEmails??[]):[])].includes(user.email?.toLowerCase());

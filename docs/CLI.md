@@ -19,6 +19,10 @@ For an application that needs a database to start, `init` and `doctor` accept `-
 
 ## Environment controls
 
+For private PostgreSQL creation before application startup, see
+[database deployment](DATABASE-DEPLOYMENT.md) and `deploy --database-file`.
+Existing database URLs continue to use `--env-file` or `--env`.
+
 `status`, `logs`, `events --follow`, `health --refresh`, `versions`, `resources`, `config`, `options`, `scale`, `clone`, `swap`, `rollback`, `version-delete`, `destroy`, and `cleanup-status` provide deployment lifecycle controls. Run each command with `--help` for required parameters. Configuration values are hidden. AWS saved configuration templates (`config-save`/`config-apply`) support Standard environments only.
 
 ## Production integrations

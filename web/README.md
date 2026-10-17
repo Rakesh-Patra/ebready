@@ -16,7 +16,7 @@ npm.cmd run backend
 npm.cmd run dev
 ```
 
-Open **http://127.0.0.1:5173/**. Vite proxies `/api` to the local backend on port 8787. Startup checks saved job records and InsForge; it does not launch AWS commands. Previously authorized jobs can keep running during a backend restart.
+Open **http://127.0.0.1:5173/**. Vite proxies `/api` and `/insforge` to the local backend on port 8787. Keep the backend running for login and project storage. Browser SDK requests use `/insforge` on the app origin so refresh cookies work without third-party cookie access. After upgrading from direct InsForge requests, log in once to establish the app-origin session. Use the same hostname consistently (localhost and 127.0.0.1 have separate cookies). Startup checks saved job records and InsForge; it does not launch AWS commands. Previously authorized jobs can keep running during a backend restart.
 
 ## Accounts
 
@@ -50,6 +50,12 @@ The worker uses its standard AWS credential chain: configured AWS profile, proce
 The worker binds only to loopback. Do not expose the development Vite server publicly.
 
 ## Deploy and manage
+
+The deployment wizard now separates **Use my existing database** from **Create AWS
+PostgreSQL before deployment**. Existing URLs work with trials; managed creation
+requires an approved persistent account, a separate cost acknowledgement, and an
+operator-reviewed regional network template. See
+[database setup and configuration](../docs/DATABASE-DEPLOYMENT.md).
 
 1. Log in using an operator-approved account.
 2. Click **New deployment**, choose **GitHub link** or **Upload ZIP**. ZIP mode requires login and operator approval even for preparation; it makes no GitHub API requests.
@@ -173,7 +179,7 @@ Tests cover account flows, wizard clicks, GitHub checks, command construction, o
 
 ## Public hosting
 
-Serve `dist/` and proxy `/api` to the worker over HTTPS. Configure that origin in InsForge and `EBKIT_WEB_ORIGINS`, provide server-only secrets, and use a dedicated IAM role. Run the worker under a process supervisor with a private persistent `.jobs` volume for deployment state and recovery records. Configure the supervisor to restart the HTTP backend independently of detached job runners. Killing an entire container or process group also kills its jobs; recovery reports those as interrupted.
+Serve `dist/` and proxy both `/api` and `/insforge` to the worker over HTTPS. Preserve Set-Cookie headers and request cookies on `/insforge`; the worker relays browser credentials to the fixed INSFORGE_URL without adding its admin key. Configure that origin in InsForge and `EBKIT_WEB_ORIGINS`, provide server-only secrets, and use a dedicated IAM role. Run the worker under a process supervisor with a private persistent `.jobs` volume for deployment state and recovery records. Configure the supervisor to restart the HTTP backend independently of detached job runners. Killing an entire container or process group also kills its jobs; recovery reports those as interrupted.
 
 Before broader production use, replace this single-host execution model with a durable distributed queue, shared quotas, encrypted secret storage and rate limiting. This recovery implementation supports one backend host and persistent disk; it does not coordinate multiple replicas or hosts.
 

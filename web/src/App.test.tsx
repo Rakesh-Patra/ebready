@@ -12,6 +12,21 @@ vi.mock('./lib', async original => ({ ...await original<typeof import('./lib')>(
 vi.mock('@insforge/sdk', () => ({ createClient: () => ({}), AuthChangeEvent: { SIGNED_OUT: 'signedOut' } }));
 import App from './App';
 
+it.each(['response', 'rejection'])('recovers a failed project load (%s) through Retry', async kind => {
+  api.auth.getCurrentUser.mockResolvedValue({data:{user:{id:'owner',email:'owner@example.test'}},error:null});
+  const limit = vi.fn();
+  if (kind === 'response') limit.mockResolvedValueOnce({data:null,error:{message:'offline'}});
+  else limit.mockRejectedValueOnce(new Error('offline'));
+  limit.mockResolvedValue({data:[],error:null});
+  api.database.from.mockReturnValue({select:()=>({order:()=>({limit})})});
+  render(<App/>);
+  expect((await screen.findByRole('alert')).textContent).toContain('Could not load projects');
+  expect(screen.queryByText('Your next deployment starts here.')).toBeNull();
+  await userEvent.click(screen.getByRole('button',{name:'Retry loading projects'}));
+  expect(await screen.findByText('Your next deployment starts here.')).toBeTruthy();
+  expect(limit).toHaveBeenCalledTimes(2);
+});
+
 beforeEach(() => { vi.clearAllMocks();api.getTrialAccount.mockResolvedValue({approved:true,trialUsed:false,durationMinutes:30}); vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ json: async () => ({ liveEnabled: true }) })); api.backend.mockResolvedValue({ dockerfile: 'Dockerfile' }); api.auth.getCurrentUser.mockResolvedValue({ data: { user: null }, error: null }); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 async function wizard() {
@@ -44,10 +59,12 @@ describe('deployment dashboard', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Create account' }));
     expect(screen.getByRole('dialog', { name: 'Create your account.' })).toBeTruthy();
   });
-  it('shows repository errors and stays on the first step', async () => {
+  it('shows live repository errors and stays on the first step', async () => {
+    api.auth.getCurrentUser.mockResolvedValue({data:{user:{id:'owner'}},error:null});
+    api.database.from.mockReturnValue({select:()=>({order:()=>({limit:async()=>({data:[],error:null})})})});
     api.backend.mockRejectedValueOnce(new Error('No root Dockerfile found.'));
     const user = userEvent.setup(); render(<App/>);
-    await user.click(await screen.findByRole('button',{name:'Explore demo'}));
+    await screen.findByText('Signed in');
     await user.click(screen.getByRole('button', { name: /New deployment/ }));
     await user.type(screen.getByLabelText('GitHub repository URL'), 'https://github.com/owner/repository'); await user.click(screen.getByRole('checkbox'));
     await user.click(screen.getByRole('button', { name: /Check repository & continue/ }));
@@ -91,6 +108,7 @@ describe('deployment dashboard', () => {
     await user.click(screen.getByRole('button', { name: /Start demo deployment/ }));
     expect(screen.getByRole('dialog').textContent).toMatch(/simulated preview/i);
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(screen.getByText('Remove this deployment'));
     await user.click(screen.getByRole('button', { name: 'Delete' }));
     const dialog = screen.getByRole('dialog', { name: 'Delete devboard?' });
     expect((within(dialog).getByRole('button', { name: 'Delete project' }) as HTMLButtonElement).disabled).toBe(true);
@@ -201,7 +219,7 @@ describe('deployment dashboard', () => {
   });
   it('opens version selection instead of silently disabling rollback', async () => {
     await failedProject(); await userEvent.click(screen.getByRole('button', { name: 'Rollback in AWS' }));
-    expect(screen.getByLabelText('Rollback version label')).toBeTruthy();
+    expect(screen.getByLabelText('Version to restore')).toBeTruthy();
     expect(screen.getByRole('status').textContent).toMatch(/previously created version/);
     expect(api.backend.mock.calls.every(call=>call[0]==='/api/profiles')).toBe(true);
   });
@@ -318,4 +336,50 @@ it('quotes a pasted database URL immediately and preserves all query parameters'
  await user.click(input);input.setSelectionRange(input.value.length,input.value.length);
  const url='postgresql://db.example.test/neondb?sslmode=require&channel_binding=require';await user.paste(url);
  expect(input.value).toBe('POSTGRES_URL="'+url+'"');
+});
+
+
+it('runs a guest demo without a backend or GitHub preparation', async () => {
+  api.backend.mockRejectedValue(new Error('Backend offline'));
+  const user = await wizard();
+  expect(api.backend).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', {name: /prepare from GitHub/})).toBeNull();
+  await user.click(screen.getByRole('button', {name: 'Start demo deployment'}));
+  expect(screen.getByRole('dialog').textContent).toContain('Simulated preview');
+  expect(api.backend).not.toHaveBeenCalled();
+  expect(api.database.from).not.toHaveBeenCalled();
+  await waitFor(() => expect(screen.getByRole('dialog').textContent).toContain('Preview ready'), {timeout: 12000});
+  expect(api.backend).not.toHaveBeenCalled();
+}, 15000);
+
+it('counts only ready demos and labels live deployment history correctly', async () => {
+  api.auth.getCurrentUser.mockResolvedValue({data:{user:{id:'owner'}},error:null});
+  const base = {user_id:'owner',repository:'https://github.com/a/b',region:'us-east-2',port:8080,status:'ready',stage:6,replicas:1,revision:1,variable_names:[],created_at:new Date().toISOString()};
+  api.database.from.mockReturnValue({select:()=>({order:()=>({limit:async()=>({data:[{...base,id:'demo',name:'demo-app',mode:'demo'},{...base,id:'live',name:'live-app',mode:'live'}],error:null})})})});
+  render(<App/>);
+  await screen.findByRole('button',{name:/demo-app/});
+  expect(screen.getByText('Demo previews').parentElement?.textContent).toContain('01');
+  await userEvent.click(screen.getByRole('button',{name:'Activity'}));
+  const row=screen.getByRole('button',{name:/live-app/});
+  expect(row.textContent).toContain('Live AWS');
+  expect(row.textContent).not.toContain('Demo');
+});
+
+it('offers managed PostgreSQL before deployment without requesting a pasted URL',async()=>{
+ api.auth.getCurrentUser.mockResolvedValue({data:{user:{id:'owner',email:'owner@example.test'}},error:null});
+ api.getTrialAccount.mockResolvedValue({approved:true,trialUsed:false,durationMinutes:null,managedDatabaseRegions:['us-east-2']});
+ api.database.from.mockReturnValue({select:()=>({order:()=>({limit:async()=>({data:[],error:null})})})});
+ api.backend.mockResolvedValueOnce({environment:[{name:'POSTGRES_URL',required:true,source:'.env.example'}],environmentScanComplete:true}).mockResolvedValueOnce({project:{id:'project',name:'app',mode:'live',status:'deploying',repository:'https://github.com/owner/app',port:8080,region:'us-east-2',variable_names:['POSTGRES_URL']}});
+ const user=userEvent.setup();render(<App/>);await screen.findByText('Signed in');
+ await user.click(screen.getByRole('button',{name:/New deployment/}));
+ await user.type(screen.getByLabelText('GitHub repository URL'),'https://github.com/owner/app');
+ await user.click(screen.getByRole('checkbox'));
+ await user.click(screen.getByRole('button',{name:/Check repository & continue/}));
+ await user.selectOptions(screen.getByLabelText('Database option'),'managed');
+ await user.click(screen.getByRole('checkbox',{name:/I understand this creates billable AWS/}));
+ expect(screen.queryByRole('button',{name:'Deploy to AWS'})).toBeNull();
+ await user.click(screen.getByRole('checkbox',{name:/I approve separate RDS charges/}));
+ expect(screen.queryByLabelText('Connection URL (POSTGRES_URL)')).toBeNull();
+ await user.click(screen.getByRole('button',{name:'Deploy to AWS'}));
+ expect(api.backend).toHaveBeenLastCalledWith('/api/deploy',expect.objectContaining({database:{mode:'managed',variables:['POSTGRES_URL'],confirmCosts:true},environment:{}}));
 });

@@ -64,6 +64,9 @@ def cli(ctx, profile=None) -> None:
             else: os.environ["AWS_PROFILE"] = previous
         ctx.call_on_close(restore)
 
+    from ebkit.aws_tls import configure_aws_tls
+    configure_aws_tls(ctx)
+
 
 
 cli.add_command(init_command, name="init")

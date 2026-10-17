@@ -180,18 +180,31 @@ def database_create(session,eb,app,env,record,data):
     record.update(application_name=app, environment_name=env, region=session.region_name,
                   account_id=session.client('sts').get_caller_identity()['Account'])
     ec2=session.client('ec2');rds=session.client('rds');vpc=data.get('vpcId');subnets=data.get('subnetIds',[]);source=data.get('applicationSecurityGroup')
-    if not re.fullmatch(r'vpc-[a-f0-9]+',vpc or '') or not isinstance(subnets,list) or len(subnets)<2 or not re.fullmatch(r'sg-[a-f0-9]+',source or ''):raise click.UsageError('Provide vpcId, at least two subnetIds and applicationSecurityGroup.')
+    if not isinstance(vpc,str) or not re.fullmatch(r'vpc-[a-f0-9]+',vpc) or not isinstance(subnets,list) or not 2<=len(subnets)<=16 or any(not isinstance(item,str) or not re.fullmatch(r'subnet-[a-f0-9]+',item) for item in subnets) or len(set(subnets))!=len(subnets) or not isinstance(source,str) or not re.fullmatch(r'sg-[a-f0-9]+',source):raise click.UsageError('Provide vpcId, at least two subnetIds and applicationSecurityGroup.')
     rows=ec2.describe_subnets(SubnetIds=subnets).get('Subnets',[])
     if len(rows)!=len(subnets) or any(row['VpcId']!=vpc for row in rows) or len({row['AvailabilityZone'] for row in rows})<2:raise click.UsageError('Database subnets must belong to this VPC and span two availability zones.')
     group=ec2.describe_security_groups(GroupIds=[source]).get('SecurityGroups',[])
     if len(group)!=1 or group[0]['VpcId']!=vpc:raise click.UsageError('Application security group must belong to the same VPC.')
+    size=number(data,'storageGb',20,20,1000);instance=data.get('instanceClass','db.t4g.micro')
+    if type(size) is not int:raise click.UsageError('storageGb must be an integer.')
+    if not isinstance(instance,str) or not re.fullmatch(r'db\.[a-z0-9]+\.[a-z0-9]+',instance):raise click.UsageError('Invalid RDS instance class.')
+    if type(data.get('multiAz',False)) is not bool:raise click.UsageError('multiAz must be true or false.')
     identifier=db_id(app);tags=owner_tags(app,env)
-    sg=ec2.create_security_group(GroupName=identifier,Description='Private EBKit PostgreSQL access',VpcId=vpc,TagSpecifications=[{'ResourceType':'security-group','Tags':tags}])['GroupId']
+    try:sg=ec2.create_security_group(GroupName=identifier,Description='Private EBKit PostgreSQL access',VpcId=vpc,TagSpecifications=[{'ResourceType':'security-group','Tags':tags}])['GroupId']
+    except ClientError as error:
+        if error.response.get('Error',{}).get('Code')!='InvalidGroup.Duplicate':raise
+        groups=ec2.describe_security_groups(Filters=[{'Name':'vpc-id','Values':[vpc]},{'Name':'group-name','Values':[identifier]}]).get('SecurityGroups',[])
+        if len(groups)!=1 or {item['Key']:item['Value'] for item in groups[0].get('Tags',[])}.get('ebkit:application')!=app:raise click.ClickException('Existing database security group is not owned by this application.')
+        sg=groups[0]['GroupId']
     record.update(database_id=identifier,database_security_group=sg,database_subnet_group=identifier);save_deployment(record)
-    ec2.authorize_security_group_ingress(GroupId=sg,IpPermissions=[{'IpProtocol':'tcp','FromPort':5432,'ToPort':5432,'UserIdGroupPairs':[{'GroupId':source}]}])
-    rds.create_db_subnet_group(DBSubnetGroupName=identifier,DBSubnetGroupDescription='Private EBKit database subnets',SubnetIds=subnets,Tags=tags)
-    size=int(number(data,'storageGb',20,20,1000));instance=data.get('instanceClass','db.t4g.micro')
-    if not re.fullmatch(r'db\.[a-z0-9]+\.[a-z0-9]+',instance):raise click.UsageError('Invalid RDS instance class.')
+    try:ec2.authorize_security_group_ingress(GroupId=sg,IpPermissions=[{'IpProtocol':'tcp','FromPort':5432,'ToPort':5432,'UserIdGroupPairs':[{'GroupId':source}]}])
+    except ClientError as error:
+        if error.response.get('Error',{}).get('Code')!='InvalidPermission.Duplicate':raise
+    try:rds.create_db_subnet_group(DBSubnetGroupName=identifier,DBSubnetGroupDescription='Private EBKit database subnets',SubnetIds=subnets,Tags=tags)
+    except ClientError as error:
+        if error.response.get('Error',{}).get('Code')!='DBSubnetGroupAlreadyExists':raise
+        rows=rds.describe_db_subnet_groups(DBSubnetGroupName=identifier).get('DBSubnetGroups',[])
+        if len(rows)!=1 or rows[0].get('VpcId')!=vpc or {item['Key']:item['Value'] for item in rds.list_tags_for_resource(ResourceName=rows[0]['DBSubnetGroupArn']).get('TagList',[])}.get('ebkit:application')!=app:raise click.ClickException('Existing database subnet group is not owned by this application.')
     rds.create_db_instance(DBInstanceIdentifier=identifier,Engine='postgres',DBInstanceClass=instance,AllocatedStorage=size,StorageType='gp3',MasterUsername='ebkitadmin',ManageMasterUserPassword=True,DBName='ebkit',VpcSecurityGroupIds=[sg],DBSubnetGroupName=identifier,PubliclyAccessible=False,StorageEncrypted=True,BackupRetentionPeriod=7,DeletionProtection=True,MultiAZ=data.get('multiAz',False),AutoMinorVersionUpgrade=True,Tags=tags)
     return {'database':identifier,'status':'creating','retention':'External RDS database persists after EB environment deletion. Credentials are managed by Secrets Manager.'}
 
@@ -219,11 +232,13 @@ def database_action(action,session,eb,app,env,record,data):
     if not arn:raise click.ClickException('Managed database credentials are unavailable.')
     credentials=json.loads(session.client('secretsmanager').get_secret_value(SecretId=arn)['SecretString'])
     if action=='database-attach':
+        variable=data.get('variable','DATABASE_URL')
+        if variable not in {'DATABASE_URL','POSTGRES_URL','POSTGRESQL_URL'}:raise click.UsageError('Choose DATABASE_URL, POSTGRES_URL or POSTGRESQL_URL.')
         current=manage.settings(eb,app,env);raw=next((item.get('Value','{}') for item in current if item.get('Namespace')==manage.ENV_NAMESPACE and item.get('OptionName')=='env-variables'),'{}');variables=json.loads(raw)
         url='postgresql://'+quote(credentials['username'],safe='')+':'+quote(credentials['password'],safe='')+'@'+endpoint['Address']+':'+str(endpoint['Port'])+'/ebkit?sslmode=require'
-        variables['DATABASE_URL']=url
+        variables[variable]=url
         eb.update_environment(EnvironmentName=env,OptionSettings=[{'Namespace':manage.ENV_NAMESPACE,'OptionName':'env-variables','Value':json.dumps(variables)}])
-        return {'database':identifier,'attached':'DATABASE_URL merged in AWS configuration; no credentials were printed. Update this setting after rotating the managed password.'}
+        return {'database':identifier,'attached':variable+' merged in AWS configuration; no credentials were printed. Update this setting after rotating the managed password.'}
     try:import psycopg
     except ImportError:raise click.ClickException('Install ebkit[database] to enable PostgreSQL connection checks and SQL migrations.') from None
     try:
