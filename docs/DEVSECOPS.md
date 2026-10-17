@@ -83,7 +83,7 @@ repository settings. They complement Gitleaks; their provider/rule coverage diff
   that an unfixed vulnerability is safe. The image SBOM records dependencies.
 
 Pinned scanner dependencies are under `security/`; Dependabot reviews them weekly,
-alongside app dependencies and Actions. Updating a tool can change findings and
+alongside app dependencies, the digest-pinned Docker base and Actions. Updating a tool can change findings and
 must receive the same review as application code.
 
 ## Passive DAST and runtime isolation

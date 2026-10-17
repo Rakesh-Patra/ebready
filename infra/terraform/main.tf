@@ -193,7 +193,8 @@ resource "aws_iam_role_policy" "github" {
     { Effect = "Allow", Action = ["s3:Get*", "s3:Put*", "s3:DeleteObject"], Resource = "arn:aws:s3:::elasticbeanstalk-${var.region}-${local.account}/resources/_runtime/_embedded_extensions/${var.name}/*" },
     { Effect = "Allow", Action = ["cloudformation:Get*", "cloudformation:Describe*", "cloudformation:ListStackResources", "cloudformation:UpdateStack"], Resource = "arn:aws:cloudformation:${var.region}:${local.account}:stack/awseb-${aws_elastic_beanstalk_environment.app.id}-stack/*" },
     # These specific inventory APIs do not support per-environment resource scoping.
-    { Effect = "Allow", Action = ["autoscaling:DescribeAutoScalingGroups", "autoscaling:DescribeLaunchConfigurations", "ec2:DescribeInstances", "ec2:DescribeInstanceStatus"], Resource = "*" },
+    { Effect = "Allow", Action = ["autoscaling:DescribeAutoScalingGroups", "autoscaling:DescribeLaunchConfigurations", "ec2:DescribeInstances", "ec2:DescribeInstanceStatus", "ec2:DescribeLaunchTemplates", "ec2:DescribeLaunchTemplateVersions"], Resource = "*" },
+    { Effect = "Allow", Action = ["autoscaling:SuspendProcesses", "autoscaling:ResumeProcesses"], Resource = "arn:aws:autoscaling:${var.region}:${local.account}:autoScalingGroup:*:autoScalingGroupName/awseb-${aws_elastic_beanstalk_environment.app.id}-stack-*" },
     { Effect = "Allow", Action = ["iam:GetRole"], Resource = [aws_iam_role.beanstalk.arn, aws_iam_role.instance.arn] },
     { Effect = "Allow", Action = ["iam:PassRole"], Resource = [aws_iam_role.beanstalk.arn, aws_iam_role.instance.arn], Condition = { StringEquals = { "iam:PassedToService" = ["elasticbeanstalk.amazonaws.com", "ec2.amazonaws.com", "cloudformation.amazonaws.com", "autoscaling.amazonaws.com"] } } },
     { Effect = "Allow", Action = ["iam:GetInstanceProfile"], Resource = aws_iam_instance_profile.app.arn },
