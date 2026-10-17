@@ -3,8 +3,8 @@
 > The Standard deployment below records the original implementation. The owner
 > subsequently requested Cluster Mode for managed HTTPS and login. Follow
 > [Cluster migration](CLUSTER-MIGRATION.md) for the current infrastructure and CI.
-> The previously captured PDF records the Standard release until replaced by
-> verified Cluster evidence.
+> The current PDF contains verified Cluster release evidence; the Standard
+> steps below remain as an implementation history.
 
 Author: Rakesh Ku Patra<br>
 Task date: 17 October 2026 in Asia Kolkata<br>

@@ -14,7 +14,7 @@ For hosting this dashboard on Standard Elastic Beanstalk with the root Dockerfil
 Terraform, GitHub OIDC, Secrets Manager and CloudWatch, follow the
 [DevOps implementation and deployment walkthrough](docs/DEVOPS-HACKATHON-GUIDE.md).
 The current infrastructure follows the [HTTPS Cluster Mode migration](docs/CLUSTER-MIGRATION.md).
-Download the [verified walkthrough PDF with six real screenshots](docs/EBKit-DevOps-Guide.pdf).
+Download the [verified walkthrough PDF with seven real screenshots](docs/EBKit-DevOps-Guide.pdf).
 Its public demo disables login and cloud/AI operations until HTTPS is configured.
 This hosting setup is separate from the customer Cluster Mode deployment engine.
 See [Git and application security](docs/DEVSECOPS.md) for commit hooks, secret

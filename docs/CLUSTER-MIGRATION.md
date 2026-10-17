@@ -1,9 +1,28 @@
 # Cluster Mode migration
 
-The dashboard is moving from the earlier Standard single-instance environment to
-Elastic Beanstalk Cluster Mode at the owner's request. Cluster Mode provisions an
+The dashboard now runs in Elastic Beanstalk Cluster Mode, replacing the earlier
+Standard single-instance deployment at the owner's request. Cluster Mode provisions an
 HTTPS listener and an ACM certificate for its own environment domain; a custom
 domain is optional. HTTP redirects to HTTPS.
+
+## Verified release: 17 October 2026
+
+- [Open the HTTPS application](https://ebkit-dashboard-practice-cluster.eba-cktxxx2w.us-east-2.elasticbeanstalk.com).
+- [Successful OIDC workflow](https://github.com/Rakesh-Patra/ebready/actions/runs/39055100638): security, verify and deploy passed.
+- Source commit: `5a5fa3e62e8c4f2a4a6c1f2e27208fddeada490d`.
+- Image digest: `sha256:3433e9812618a3d2be611680ad9cc90867421f4c3a785d894cc3108c5eef5e87`.
+- Release: `release-5a5fa3e62e8c-39055100638-1`, Ready / Green.
+- 65 targeted Python tests and 227 frontend tests passed.
+- Trusted TLS, HTTP-to-HTTPS redirect, health and built assets verified.
+- Login is enabled; a real browser submitted a nonexistent test identity through
+  the SDK and received normal invalid-credentials validation (401). An empty
+  same-origin request received field validation (400). No account was created.
+- Replica, memory and CPU metrics contain actual CloudWatch samples; both Cluster
+  alarms are OK. No alarm notification subscriptions are configured.
+
+The first OIDC update rolled back cleanly after CloudFormation reported missing
+ListTagsForResource permission. Granting that read action on only this environment
+resolved the failure. The successful final run above is the delivery evidence.
 
 ## Infrastructure ownership
 
@@ -79,3 +98,15 @@ same-origin authentication/database calls to the proxy. Tests exercise the real
 SDK and ensure unrelated application routes and external URLs stay unchanged.
 Deployment capture tests a nonexistent example.invalid account, expects normal
 credential validation, and never creates an account or submits real credentials.
+
+## Completed Standard removal
+
+After the successful OIDC release and real browser login check, Terraform removed
+the Standard environment and its dedicated EC2 profile, IAM roles/policies and
+obsolete alarms. The reviewed cutover applied 3 additions, 5 updates and exactly
+9 deletions; the healthy Cluster stack was unchanged. Shared Cluster log groups
+are retained on application destruction, with seven-day retention configured.
+
+Final read-back confirmed only the Cluster environment is active for this app, both
+alarms are OK and all four shared log groups retain seven days. The final full
+Terraform plan reported no changes after CI changed the image version.

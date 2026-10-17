@@ -110,10 +110,9 @@ missing cross-origin embedder policy. These are retained for review. Cache polic
 and cross-origin isolation need compatibility testing; the SPA warning also means
 this traditional spider is not complete coverage of the React dashboard.
 
-These Docker runtime flags are exercised in CI. They are not automatically applied
-to the Elastic Beanstalk host by Dockerrun v1. The live container runs nonroot and
-uses a multistage build, but the host needs separate platform-specific hardening
-validation. Distroless is not a drop-in runtime here: the app includes Python CLI
+These Docker runtime flags are exercised in CI. The Cluster pod runtime is
+service-managed and requires separate platform-specific hardening validation.
+The live container runs nonroot and uses a multistage build. Distroless is not a drop-in runtime here: the app includes Python CLI
 tools, Git and Node, rather than a Node-only static service.
 
 ## Branch protection, ownership and RBAC
