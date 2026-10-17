@@ -1,5 +1,6 @@
 import { createClient } from '@insforge/sdk';
-const publicConfig = typeof window === 'undefined' ? undefined : (window as Window & { __EBKIT_PUBLIC_CONFIG__?: { baseUrl: string; anonKey: string } }).__EBKIT_PUBLIC_CONFIG__;
+const publicConfig = typeof window === 'undefined' ? undefined : (window as Window & { __EBKIT_PUBLIC_CONFIG__?: { baseUrl: string; anonKey: string; publicDemo?: boolean } }).__EBKIT_PUBLIC_CONFIG__;
+export const publicDemo = publicConfig?.publicDemo === true;
 export const insforge = createClient({
   baseUrl: typeof window === 'undefined' ? import.meta.env.VITE_INSFORGE_URL : `${window.location.origin}/insforge`,
   anonKey: publicConfig?.anonKey || import.meta.env.VITE_INSFORGE_ANON_KEY,

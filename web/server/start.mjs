@@ -9,6 +9,7 @@ for (const line of (existsSync(localEnv) ? readFileSync(localEnv, 'utf8') : '').
 }
 const databaseTemplates=process.env.EBKIT_DATABASE_TEMPLATES_FILE?JSON.parse(readFileSync(process.env.EBKIT_DATABASE_TEMPLATES_FILE,'utf8')):{};
 const config = {
+  publicDemo: process.env.EBKIT_PUBLIC_DEMO === 'true',
   ...(process.env.EBKIT_STATIC_ROOT ? { staticRoot: path.resolve(process.env.EBKIT_STATIC_ROOT) } : {}),
   databaseTemplates,
   baseUrl: process.env.INSFORGE_URL, anonKey: process.env.INSFORGE_ANON_KEY,

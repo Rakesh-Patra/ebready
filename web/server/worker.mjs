@@ -325,7 +325,8 @@ export async function createWorker(config, dependencies = {}) {
     const reply = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); };
     try {
       const route = new URL(req.url, 'http://localhost').pathname;
-      if (config.staticRoot && await serveDashboard(req, res, config.staticRoot, { baseUrl: config.baseUrl, anonKey: config.anonKey })) return;
+      if (config.publicDemo && (route === '/insforge' || route.startsWith('/insforge/'))) return reply(403, { error: 'Authentication is disabled on this public demo until HTTPS is configured.' });
+      if (config.staticRoot && await serveDashboard(req, res, config.staticRoot, { baseUrl: config.baseUrl, anonKey: config.anonKey, publicDemo: config.publicDemo })) return;
       if (req.method === 'GET' && route === '/api/health') return reply(200, { liveEnabled: !!(config.liveEnabled && admin && config.allowedEmails.length), awsCallsDuringStartup: false, recoveringJobs: running.size });
       const origin = req.headers.origin;
       if (origin && !config.origins.includes(origin)) throw new HttpError(403, 'Request origin is not allowed.');

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { AuthChangeEvent } from '@insforge/sdk';
 import { ArrowUpRight, ArrowRight, Boxes, Check, ChevronRight, Cloud, Code2, Copy, Download, ExternalLink, FolderGit2, Github, Globe, LayoutDashboard, LogOut, Moon, Sun, Plus, RefreshCw, Search, Settings2, ShieldCheck, Terminal, Trash2, X, Zap } from 'lucide-react';
-import { backend, columns, insforge, message, parseEnv, quoteEnvValues, parseRepository, type Project, getTrialAccount, type TrialAccount } from './lib';
+import { publicDemo, backend, columns, insforge, message, parseEnv, quoteEnvValues, parseRepository, type Project, getTrialAccount, type TrialAccount } from './lib';
 import TrialCountdown,{trialExpired} from './TrialCountdown';
 import AccountControls from './AccountControls';
 import MobileMenu from './MobileMenu';
@@ -54,7 +54,7 @@ export default function App() {
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null), [deleteName, setDeleteName] = useState('');
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]), mounted = useRef(true);
 
-  useEffect(() => { mounted.current = true; const unsubscribe = insforge.auth.onAuthStateChange(event => {
+  useEffect(() => { mounted.current = true; if(publicDemo){setAuthLoading(false);return;} const unsubscribe = insforge.auth.onAuthStateChange(event => {
     if (event === AuthChangeEvent.SIGNED_OUT && mounted.current) { setUser(null);setGuestWorkspace(false);setView('projects'); setWizard(false); setSelected(null); }
   }); insforge.auth.getCurrentUser().then(({ data, error }) => {
     if (mounted.current) { setUser(error ? null : (data?.user as User ?? null)); setAuthLoading(false); }

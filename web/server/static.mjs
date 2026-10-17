@@ -26,7 +26,7 @@ export async function serveDashboard(req, res, root, publicConfig = {}) {
     if (!candidate.startsWith(base + path.sep)) return finish(404);
     let body = await readFile(candidate);
     if (candidate === path.join(base, 'index.html')) {
-      const settings = JSON.stringify({ baseUrl: publicConfig.baseUrl || '', anonKey: publicConfig.anonKey || '' }).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+      const settings = JSON.stringify({ baseUrl: publicConfig.baseUrl || '', anonKey: publicConfig.anonKey || '', publicDemo: publicConfig.publicDemo === true }).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
       body = Buffer.from(body.toString('utf8').replace('</head>', `<script>window.__EBKIT_PUBLIC_CONFIG__=${settings};</script></head>`));
     }
     res.writeHead(200, { 'Content-Type': types[path.extname(candidate)] || 'application/octet-stream', 'Content-Length': body.length, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff' });

@@ -38,3 +38,13 @@ web/dist/
 web/.test-tmp*/
 web/server/.jobs/
 *.tsbuildinfo
+
+# Terraform state and local plans can contain infrastructure configuration.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+crash.log

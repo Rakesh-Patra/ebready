@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { X, Boxes, ArrowRight, GitBranch, Cloud, ShieldCheck, LoaderCircle } from 'lucide-react';
-import { insforge, message } from './lib';
+import { insforge, message, publicDemo } from './lib';
 import './auth.css';
 
 export default function AuthDialog({ initialMode, close, authenticated }: { initialMode: 'login' | 'signup'; close: () => void; authenticated: () => Promise<void> }) {
   const [mode, setMode] = useState<string>(initialMode), [email, setEmail] = useState(''), [password, setPassword] = useState(''), [name, setName] = useState(''), [otp, setOtp] = useState('');
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
+  if (publicDemo) return <div className="overlay top"><section className="modal compact" role="dialog" aria-modal="true" aria-label="Public demo"><h2>Public demo</h2><p>Login is disabled until HTTPS is configured. Use Explore demo without entering credentials.</p><button className="button" onClick={close}>Close</button></section></div>;
   async function submit(event: React.FormEvent) {
     event.preventDefault(); setBusy(true); setError(''); setNotice('');
     try {
