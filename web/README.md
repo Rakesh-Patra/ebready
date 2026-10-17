@@ -179,6 +179,13 @@ Tests cover account flows, wizard clicks, GitHub checks, command construction, o
 
 ## Public hosting
 
+For the container packaging and today's AWS deployment exercise, see
+[Dashboard DevOps practice](../docs/DASHBOARD-DEVOPS-PRACTICE.md).
+Set `EBKIT_STATIC_ROOT` to the built frontend directory to serve it from the worker.
+`HOST` and `PORT` configure the listener (local defaults: `127.0.0.1:8787`).
+The root Dockerfile sets `0.0.0.0:8080` and injects public InsForge settings at runtime.
+Server environment variables can be provided directly without a local `.env` file.
+
 Serve `dist/` and proxy both `/api` and `/insforge` to the worker over HTTPS. Preserve Set-Cookie headers and request cookies on `/insforge`; the worker relays browser credentials to the fixed INSFORGE_URL without adding its admin key. Configure that origin in InsForge and `EBKIT_WEB_ORIGINS`, provide server-only secrets, and use a dedicated IAM role. Run the worker under a process supervisor with a private persistent `.jobs` volume for deployment state and recovery records. Configure the supervisor to restart the HTTP backend independently of detached job runners. Killing an entire container or process group also kills its jobs; recovery reports those as interrupted.
 
 Before broader production use, replace this single-host execution model with a durable distributed queue, shared quotas, encrypted secret storage and rate limiting. This recovery implementation supports one backend host and persistent disk; it does not coordinate multiple replicas or hosts.
