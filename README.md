@@ -15,6 +15,8 @@ Terraform, GitHub OIDC, Secrets Manager and CloudWatch, follow the
 [DevOps implementation and deployment walkthrough](docs/DEVOPS-HACKATHON-GUIDE.md).
 Its public demo disables login and cloud/AI operations until HTTPS is configured.
 This hosting setup is separate from the customer Cluster Mode deployment engine.
+See [Git and application security](docs/DEVSECOPS.md) for commit hooks, secret
+scanning, SAST/SCA, Checkov, passive DAST and the solo-maintainer protection policy.
 
 Automated tests cover local behavior and mocked AWS integrations. Live AWS integration tests are still required. AWS resources incur charges; external databases and snapshots persist independently of environment teardown. Cost reports explicitly identify attribution limits.
 

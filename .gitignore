@@ -48,3 +48,12 @@ web/server/.jobs/
 *.tfvars.json
 !*.tfvars.example
 crash.log
+
+# Private keys and credential bundles (public certificates are not secrets).
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+credentials.json

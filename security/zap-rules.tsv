@@ -1,0 +1,5 @@
+# Baseline is passive: FAIL selected missing browser protections, retain other warnings.
+10020	FAIL	Missing anti-clickjacking protection
+10021	FAIL	Missing X-Content-Type-Options
+10038	WARN	CSP requires a reviewed policy for supported integrations
+10035	WARN	HSTS requires HTTPS; the public demo currently uses HTTP

@@ -16,7 +16,8 @@ COPY pyproject.toml README.md ./
 COPY ebkit/ ./ebkit/
 RUN python3 -m venv /opt/ebkit \
     && /opt/ebkit/bin/pip install --no-cache-dir --upgrade 'setuptools>=78.1.1' \
-    && /opt/ebkit/bin/pip install --no-cache-dir '.[database]'
+    && /opt/ebkit/bin/pip install --no-cache-dir '.[database]' \
+    && /opt/ebkit/bin/pip uninstall --yes pip setuptools wheel
 COPY web/package.json web/package-lock.json ./web/
 RUN cd web && npm ci --omit=dev && npm cache clean --force \
     && rm -rf /usr/local/lib/node_modules/npm /opt/yarn* \

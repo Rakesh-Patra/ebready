@@ -17,3 +17,16 @@ venv
 artifacts
 build
 web/.test-tmp*
+**/.terraform
+**/*.tfstate*
+**/*.tfplan
+**/*.tfvars
+**/*.tfvars.json
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/id_rsa
+**/id_ed25519
+**/credentials.json
+**/.npmrc

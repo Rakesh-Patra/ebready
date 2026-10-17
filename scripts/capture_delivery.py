@@ -45,6 +45,12 @@ def main():
                 raise RuntimeError('The public workflow page could not be captured.')
             page.screenshot(path=str(output / '05-github-actions.png'), full_page=True)
             shots.append(('05-github-actions.png', 'Actual public GitHub Actions run; see the linked run for individual steps'))
+        dast_report = root / 'dast/zap.html'
+        if dast_report.exists():
+            page.set_viewport_size({'width': 1440, 'height': 1000})
+            page.goto(dast_report.resolve().as_uri(), wait_until='load')
+            page.screenshot(path=str(output / '06-passive-dast-report.png'))
+            shots.append(('06-passive-dast-report.png', 'Actual ZAP report for the isolated CI container; warnings require review'))
         guide = Path('docs/DEVOPS-HACKATHON-GUIDE.md').read_text(encoding='utf-8')
         content = markdown.markdown(guide, extensions=['fenced_code'])
         # The architecture is readable as text when no Mermaid renderer is available.

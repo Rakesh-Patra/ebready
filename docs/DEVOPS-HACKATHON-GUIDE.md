@@ -185,11 +185,12 @@ write the release prefix in this S3 bucket, create versions for this application
 and update this one environment. Beanstalk also requires configuration permissions
 on its exact account-and-region platform bucket even after bootstrap; these are
 scoped to that bucket. Runtime object operations are limited to this environment's
-`_runtime/*` prefix. Stack reads and updates are limited to its backing
+storage prefix (including runtime and application-source files), plus this
+application's shared `_embedded_extensions` prefix. Stack reads and updates are limited to its backing
 `awseb-ENVIRONMENT_ID-stack` CloudFormation stack. Unrelated buckets, environment
 runtime objects and stacks are outside these grants.
-Read-only EC2, Auto Scaling and load balancer inventory APIs use `Resource: *`,
-as required by the platform's deployment checks. Mutating stack and runtime
+Only the selected EC2/Auto Scaling inventory APIs and ECR token exchange use
+`Resource: *` where per-resource scoping is unavailable. Mutating stack and runtime
 permissions remain environment-scoped. The role cannot create IAM roles, read
 the Gemini secret or Terraform state, or provision the complete Terraform stack.
 
@@ -353,6 +354,10 @@ instance practice environment is not highly available.
 
 ## References
 
+The [Git and application security implementation](DEVSECOPS.md) covers the native
+commit hook, Gitleaks history scanning, Semgrep, pip-audit, Checkov, passive ZAP,
+CODEOWNERS and the owner's requested solo-maintainer branch protections.
+
 - [AWS Docker configuration](https://docs.aws.amazon.com/elasticbeanstalk/latest/dg/create_deploy_docker.container.console.html)
 - [AWS enhanced health API configuration](https://docs.aws.amazon.com/elasticbeanstalk/latest/dg/health-enhanced-api.html)
 - [AWS secret references in environment variables](https://docs.aws.amazon.com/elasticbeanstalk/latest/dg/AWSHowTo.secrets.env-vars.html)
@@ -385,8 +390,11 @@ application-version request exposed that bootstrap prerequisite.
 Beanstalk version events exposed missing permissions on its regional platform
 bucket. The delivery policy now permits the required configuration operations
 on that exact bucket, runtime-object reads/writes beneath this environment's
-`resources/environments/ENVIRONMENT_ID/_runtime/*` prefix, and source reads only
-beneath the custom release prefix. It does not grant access to other environments.
+`resources/environments/ENVIRONMENT_ID/*` prefix, and source reads only
+beneath the custom release prefix. A comparison with successful operator S3 metadata
+also identified `resources/_runtime/_embedded_extensions/APPLICATION_NAME/*`;
+this app-scoped shared prefix is now included. No unrelated application's shared
+assets or environment prefixes are included.
 Optional
 application-version pre-processing is disabled for the Dockerrun-only Standard
 bundle; AWS documents that this step validates env.yaml and .ebextensions rather
@@ -405,3 +413,37 @@ security default and avoid repeated drift.
 The final results for today's deployment are appended here after verification.
 Until that happens, infrastructure and workflow files are implementation evidence,
 not proof of a successful public application release.
+
+A controlled diagnostic deployed the identical candidate through the bootstrap
+profile and reached Ready/Green on
+`release-f781d4cffd8a-39028523538-2`. This established that the image, source bundle
+and Standard environment can deploy. It is explicitly an operator deployment,
+not proof of successful GitHub OIDC application delivery; the latter still needs a
+successful delivery-job receipt. OIDC identity exchange and image publication had
+already succeeded before the remaining Beanstalk authorization failure.
+
+The Git security extension was checked locally with seven staged-index tests, a
+browser security-header test, Gitleaks history scanning and seven local Semgrep
+rules. Checkov identified overly broad inventory reads, which were narrowed to
+specific APIs, and now passes Terraform with seven resource-local exceptions.
+The actual root Dockerfile and Actions workflow pass without Checkov exceptions.
+The exceptions retain AES256 encryption, the explicitly pinned demo platform and
+single-region scope; separate S3 data-access auditing and automatic platform
+maintenance remain production follow-ups. The enhanced-health exception records
+a confirmed Checkov 3.3.29 namespace mismatch, rather than changing valid AWS
+configuration to satisfy the scanner.
+
+GitHub read-back confirmed required PR/check enforcement for `main`, administrator
+enforcement, disabled force pushes/deletion, secret scanning, push protection and
+Dependabot security updates. Independent approval is intentionally not mandatory
+for this solo-maintainer repository. The tracked CODEOWNERS uses the GitHub handle;
+no personal email was published. Local hooks were installed and their staged scan
+passed. The new CI security gates still require a successful run before being
+reported as verified delivery evidence.
+
+Local passive ZAP completed with 63 passing checks, zero FAIL findings and four
+warning categories retained in its report. The test ran the actual application
+image with a read-only root filesystem, temporary writable mounts, dropped Linux
+capabilities, no new privileges, and resource limits. Its disposable container and
+network were then removed. This is CI/local runtime evidence, not proof that those
+Docker flags are applied automatically by the live Beanstalk platform.

@@ -321,6 +321,10 @@ export async function createWorker(config, dependencies = {}) {
     } catch (error) { for (const timer of monitors) clearInterval(timer); await release(); throw error; }
   }
   const server = createServer(async (req, res) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     let ownsZipReplacement=false;
     const reply = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); };
     try {
