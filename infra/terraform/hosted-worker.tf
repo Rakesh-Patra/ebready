@@ -18,6 +18,7 @@ resource "aws_iam_role_policy" "hosted_worker" {
   role = aws_iam_role.application.id
   policy = jsonencode({ Version = "2012-10-17", Statement = [
     { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject"], Resource = "${aws_s3_bucket.releases.arn}/worker-state/*" },
+    { Effect = "Allow", Action = ["s3:ListBucket"], Resource = aws_s3_bucket.releases.arn, Condition = { StringLike = { "s3:prefix" = "worker-state/*" } } },
     { Effect = "Allow", Action = ["ec2:DescribeVpcs", "ec2:DescribeSubnets"], Resource = "*" },
     { Effect = "Allow", Action = ["iam:GetRole"], Resource = [data.aws_iam_role.cluster.arn, data.aws_iam_role.node.arn, data.aws_iam_role.observability.arn, "arn:aws:iam::${local.account}:role/ebkit-ebk-*-build-role"] },
     { Effect = "Allow", Action = ["iam:CreateRole", "iam:PutRolePolicy"], Resource = "arn:aws:iam::${local.account}:role/ebkit-ebk-*-build-role", Condition = { ArnEquals = { "iam:PermissionsBoundary" = aws_iam_policy.build_boundary.arn } } },

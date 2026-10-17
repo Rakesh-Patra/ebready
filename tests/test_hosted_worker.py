@@ -31,7 +31,7 @@ def test_hosted_metadata_survives_local_file_loss(monkeypatch, tmp_path):
     from ebkit.deployment_state import load_deployments
     import io
     monkeypatch.setenv('EBKIT_STATE_S3_BUCKET','private-state')
-    s3=MagicMock();s3.get_object.return_value={'Body':io.BytesIO(json.dumps({'deployments':[{'environment_name':'ebk-example-cluster'}]}).encode())}
+    s3=MagicMock();s3.list_objects_v2.return_value={'Contents':[{'Key':'worker-state/11111111-1111-4111-8111-111111111111.json'}]};s3.get_object.return_value={'Body':io.BytesIO(json.dumps({'deployments':[{'environment_name':'ebk-example-cluster'}]}).encode())}
     with patch('boto3.client',return_value=s3):
         records=load_deployments(tmp_path/'11111111-1111-4111-8111-111111111111.json')
     assert records[0]['environment_name']=='ebk-example-cluster'
@@ -41,7 +41,7 @@ def test_hosted_metadata_survives_local_file_loss(monkeypatch, tmp_path):
 def test_hosted_metadata_fails_closed_when_remote_storage_is_denied(monkeypatch, tmp_path):
     from ebkit.deployment_state import load_deployments
     from botocore.exceptions import ClientError
-    monkeypatch.setenv('EBKIT_STATE_S3_BUCKET','private-state');s3=MagicMock()
+    monkeypatch.setenv('EBKIT_STATE_S3_BUCKET','private-state');s3=MagicMock();s3.list_objects_v2.return_value={'Contents':[{'Key':'worker-state/11111111-1111-4111-8111-111111111111.json'}]}
     s3.get_object.side_effect=ClientError({'Error':{'Code':'AccessDenied'}},'GetObject')
     with patch('boto3.client',return_value=s3), pytest.raises(ClientError):
         load_deployments(tmp_path/'11111111-1111-4111-8111-111111111111.json')

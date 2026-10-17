@@ -41,6 +41,11 @@ def load_deployments(path: Path | None = None) -> list[dict[str, Any]]:
     if remote:
         client, bucket, key = remote
         from botocore.exceptions import ClientError
+        # Prefix-scoped ListBucket distinguishes a new key from denied reads without
+        # granting visibility into Terraform state or other bucket prefixes.
+        page = client.list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1)
+        if not any(item['Key'] == key for item in page.get('Contents', [])):
+            return []
         try:
             data = json.loads(client.get_object(Bucket=bucket, Key=key)['Body'].read())
         except ClientError as error:
