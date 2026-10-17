@@ -14,19 +14,20 @@ from ebkit.aws_tls import configure_aws_tls
 
 def main():
     name, region = 'ebkit-dashboard-practice', 'us-east-2'
+    environment = name + '-cluster'
     evidence = {'capturedAt': datetime.now(timezone.utc).isoformat(), 'region': region}
     with click.Context(click.Command('collect-evidence')) as ctx:
         configure_aws_tls(ctx)
         session = boto3.Session(profile_name='default', region_name=region)
         eb, iam = session.client('elasticbeanstalk'), session.client('iam')
-        row = eb.describe_environments(EnvironmentNames=[name])['Environments'][0]
-        evidence['environment'] = {key: row.get(key) for key in ['EnvironmentName', 'EnvironmentId', 'Status', 'Health', 'HealthStatus', 'VersionLabel', 'CNAME', 'SolutionStackName']}
-        configurations = eb.describe_configuration_settings(ApplicationName=name, EnvironmentName=name)['ConfigurationSettings'][0]['OptionSettings']
-        evidence['runtimeSecretReferences'] = sorted(r['OptionName'] for r in configurations if r['Namespace'] == 'aws:elasticbeanstalk:application:environmentsecrets')
+        row = eb.describe_environments(EnvironmentNames=[environment])['Environments'][0]
+        evidence['environment'] = {key: row.get(key) for key in ['EnvironmentName', 'EnvironmentId', 'Status', 'Health', 'HealthStatus', 'VersionLabel', 'CNAME', 'Tier']}
+        configurations = eb.describe_configuration_settings(ApplicationName=name, EnvironmentName=environment)['ConfigurationSettings'][0]['OptionSettings']
+        evidence['runtimeSecretReferences'] = sorted(key for r in configurations if r['Namespace'] == 'aws:elasticbeanstalk:eks:environment' and r['OptionName'] == 'secrets' for key in json.loads(r['Value']))
         role = iam.get_role(RoleName=name + '-github-deploy')['Role']
         evidence['oidcTrust'] = role['AssumeRolePolicyDocument']
-        evidence['instanceRole'] = name + '-ec2'
-        logs = session.client('logs').describe_log_groups(logGroupNamePrefix='/aws/elasticbeanstalk/' + name)['logGroups']
+        evidence['applicationRole'] = name + '-application'
+        logs = session.client('logs').describe_log_groups(logGroupNamePrefix='/aws/elasticbeanstalk/')['logGroups']
         evidence['logGroups'] = [{'name': r['logGroupName'], 'retentionDays': r.get('retentionInDays')} for r in logs]
         alarms = session.client('cloudwatch').describe_alarms(AlarmNamePrefix=name)['MetricAlarms']
         evidence['alarms'] = [{'name': r['AlarmName'], 'state': r['StateValue'], 'metric': r['MetricName'], 'notificationsConfigured': bool(r['AlarmActions'])} for r in alarms]

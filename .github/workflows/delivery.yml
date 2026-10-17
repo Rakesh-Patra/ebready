@@ -168,6 +168,9 @@ jobs:
           retention-days: 7
 
   deploy:
+    concurrency:
+      group: ebkit-production-deployment
+      cancel-in-progress: false
     needs: [verify, security]
     if: github.event_name != 'pull_request' && github.ref_name == vars.DEPLOYMENT_BRANCH
     runs-on: ubuntu-latest
@@ -195,6 +198,17 @@ jobs:
         run: |
           docker load -i artifacts/image.tar
           python -m pip install boto3
+      - name: Install pinned Cluster-compatible AWS CLI
+        run: |
+          curl --fail --silent --show-error --location --retry 3 https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.37.10.zip -o "$RUNNER_TEMP/awscli.zip"
+          echo "1aaed142cb63294e41ef70431fe9c602dbb869f8a21b6b8fc9d5ffd53b5c9235  $RUNNER_TEMP/awscli.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/awscli.zip" -d "$RUNNER_TEMP/awscli-install"
+          sudo "$RUNNER_TEMP/awscli-install/aws/install" --update
+          aws --version
+      - name: Reject retries of superseded branch commits
+        run: |
+          CURRENT_SHA=$(git ls-remote origin "$GITHUB_REF" | cut -f1)
+          test "$CURRENT_SHA" = "$GITHUB_SHA" || { echo "This commit has been superseded; deploy the current branch head."; exit 1; }
       - name: Exchange the GitHub OIDC token for short lived AWS credentials
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
@@ -206,7 +220,7 @@ jobs:
       - name: Publish an immutable image and deploy its digest
         env:
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-          EB_ARTIFACT_BUCKET: ${{ vars.EB_ARTIFACT_BUCKET }}
+          EB_CLUSTER_STACK: ${{ vars.EB_CLUSTER_STACK }}
           EB_APPLICATION: ${{ vars.EB_APPLICATION }}
           EB_ENVIRONMENT: ${{ vars.EB_ENVIRONMENT }}
         run: |

@@ -19,14 +19,6 @@ variable "github_subject_prefix" {
   default     = ""
   description = "Exact sub_claim_prefix returned by GitHub's OIDC customization API, including immutable repository IDs when enabled."
 }
-variable "solution_stack" {
-  type        = string
-  description = "A reviewed current Amazon Linux 2023 Docker platform returned by AWS."
-}
-variable "instance_type" {
-  type    = string
-  default = "t3.small"
-}
 variable "public_configuration" {
   type        = map(string)
   default     = {}
@@ -39,5 +31,5 @@ variable "public_configuration" {
 variable "secret_arns" {
   type        = map(string)
   default     = {}
-  description = "Optional pre-existing Secrets Manager ARNs. Values are never read by Terraform. Unused for the public demo."
+  description = "Optional pre-existing Secrets Manager ARNs. Values are never read by Terraform. Resolved using the Cluster application Pod Identity role."
 }

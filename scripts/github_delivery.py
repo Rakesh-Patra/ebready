@@ -70,7 +70,7 @@ def main():
             config_path.write_text(json.dumps(config, indent=2), encoding='utf-8')
         output = json.loads((ROOT / 'artifacts/devops/terraform-outputs.json').read_text(encoding='utf-8-sig'))
         values = {'AWS_REGION': 'us-east-2', 'AWS_ROLE_ARN': output['github_role_arn']['value'],
-                  'EB_ARTIFACT_BUCKET': output['artifact_bucket']['value'],
+                  'EB_CLUSTER_STACK': output['cluster_stack']['value'],
                   'ECR_REPOSITORY': output['ecr_repository']['value'],
                   'EB_APPLICATION': output['application_name']['value'],
                   'EB_ENVIRONMENT': output['environment_name']['value'],
@@ -85,7 +85,7 @@ def main():
         for name, value in values.items():
             api('PATCH' if name in existing else 'POST',
                 base + '/actions/variables' + ('/' + name if name in existing else ''), {'name': name, 'value': value})
-        print('Configured production environment branch restrictions and seven non-secret repository variables. No AWS access keys stored.')
+        print('Configured production environment branch restrictions and non-secret Cluster repository variables. No AWS access keys stored.')
 
 
 if __name__ == '__main__':

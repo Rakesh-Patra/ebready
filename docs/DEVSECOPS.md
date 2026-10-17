@@ -101,8 +101,8 @@ not an active attack scan or a test of authenticated/cloud workflows.
 
 The server sends anti-framing, nosniff, referrer and permissions headers. CSP is
 still a reported warning: the application injects runtime configuration inline,
-so a strict policy needs nonce/hash support and integration testing. HSTS remains
-pending HTTPS. Do not add HSTS to an HTTP-only demo and claim that HTTPS exists.
+so a strict policy needs nonce/hash support and integration testing. The isolated CI target uses HTTP, so HSTS there does not establish HTTPS.
+The Cluster deployment independently verifies its managed HTTPS endpoint.
 
 The local baseline completed with 63 passing checks, no FAIL findings and four
 warning categories: missing CSP, non-storable responses, SPA coverage advice, and
@@ -163,7 +163,7 @@ third-party integration credentials in untrusted PR code.
 Keep redacted Gitleaks, Semgrep, Checkov, dependency, Trivy, ZAP and SBOM artifacts
 from the same source commit. Read the actual job conclusions before claiming a gate
 passed. The walkthrough records live deployment evidence separately from prepared
-configuration. HTTPS, a reviewed CSP, active/authenticated DAST, alarm notifications,
+configuration. A reviewed CSP, active/authenticated DAST, alarm notifications,
 and independent review remain distinct follow-up work until verified.
 
 References: [Gitleaks](https://github.com/gitleaks/gitleaks),

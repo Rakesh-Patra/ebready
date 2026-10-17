@@ -27,6 +27,12 @@ def main():
         page.get_by_role('button', name='Explore demo', exact=True).wait_for()
         page.screenshot(path=str(output / '01-live-application.png'), full_page=True)
         shots.append(('01-live-application.png', 'Deployed application landing page'))
+        if receipt.get('httpsConfigured'):
+            page.get_by_role('button', name='Log in', exact=True).click()
+            page.get_by_role('dialog').wait_for()
+            page.screenshot(path=str(output / '07-https-login.png'), full_page=True)
+            shots.append(('07-https-login.png', 'Enabled sign-in dialog on the verified HTTPS origin'))
+            page.get_by_role('button', name='Close authentication', exact=True).click()
         page.get_by_role('button', name='Explore demo', exact=True).click()
         page.get_by_role('button', name='New deployment', exact=True).wait_for()
         page.screenshot(path=str(output / '02-deployed-dashboard.png'), full_page=True)
@@ -38,7 +44,11 @@ def main():
         page.set_viewport_size({'width': 1000, 'height': 400})
         page.screenshot(path=str(output / '04-health-response.png'), full_page=True)
         shots.append(('04-health-response.png', 'Health response from the deployed API'))
-        assert page.request.get(receipt['url'] + '/insforge/api/auth/sessions').status == 403
+        if receipt.get('httpsConfigured'):
+            response = page.request.post(receipt['url'] + '/insforge/api/auth/sessions', data={}, headers={'Origin': receipt['url']})
+            assert response.status in (400, 401, 422)
+        else:
+            assert page.request.get(receipt['url'] + '/insforge/api/auth/sessions').status == 403
         if os.environ.get('EBKIT_CAPTURE_GITHUB') == 'true':
             page.set_viewport_size({'width': 1440, 'height': 1000})
             response = page.goto(receipt['runUrl'], wait_until='networkidle')
@@ -52,7 +62,8 @@ def main():
             page.goto(dast_report.resolve().as_uri(), wait_until='load')
             page.screenshot(path=str(output / '06-passive-dast-report.png'))
             shots.append(('06-passive-dast-report.png', 'Actual ZAP report for the isolated CI container; warnings require review'))
-        guide = Path('docs/DEVOPS-HACKATHON-GUIDE.md').read_text(encoding='utf-8')
+        guide_path = Path('docs/CLUSTER-MIGRATION.md') if receipt.get('mode') == 'Cluster' else Path('docs/DEVOPS-HACKATHON-GUIDE.md')
+        guide = guide_path.read_text(encoding='utf-8')
         security_guide = Path('docs/DEVSECOPS.md')
         if security_guide.exists():
             guide += '\n\n' + security_guide.read_text(encoding='utf-8')
@@ -65,7 +76,12 @@ def main():
                              content, flags=re.DOTALL)
         # The architecture is readable as text when no Mermaid renderer is available.
         evidence = '<h2>Verified release evidence</h2><p>Capture time ' + html.escape(datetime.now(timezone.utc).isoformat()) + '</p>'
-        evidence += '<pre>' + html.escape(json.dumps(receipt, indent=2)) + '</pre>'
+        public_receipt = {key: receipt[key] for key in ['mode', 'commit', 'runUrl', 'verified',
+            'homepageStatus', 'healthStatus', 'assetStatus', 'loginValidationStatus',
+            'httpRedirectsToHttps', 'publicDemoGuards', 'verifiedAt', 'url', 'awsStatus',
+            'awsHealth', 'httpsConfigured'] if key in receipt}
+        public_receipt['imageDigest'] = receipt['image'].split('@')[-1]
+        evidence += '<pre>' + html.escape(json.dumps(public_receipt, indent=2)) + '</pre>'
         for filename, caption in shots:
             evidence += f'<figure><img src="{filename}" alt="{html.escape(caption)}"><figcaption>{html.escape(caption)}</figcaption></figure>'
         document = '''<!doctype html><html><head><meta charset="utf-8"><title>EBKit DevOps implementation and deployment</title><style>
