@@ -11,12 +11,14 @@ const project={user_id:'owner',repository:'https://github.com/a/b',stage:6,creat
 it('guides an operation with relevant settings, exact confirmation and visible server errors',async()=>{
  const action=vi.fn(async()=>{throw new Error('Test backend error');}),user=userEvent.setup();
  render(<CloudControls project={project} projects={[project]} privileged busy={false} onAction={action}/>);
+ await user.click(screen.getByText('Advanced AWS settings'));
+ await user.click(screen.getByText('Infrastructure tools: databases, spending & automation'));
  await user.selectOptions(screen.getByLabelText('Production operation'),'autoscale');
- const settings=JSON.parse((screen.getByLabelText('Reviewed operation JSON') as HTMLTextAreaElement).value);
+ const settings=JSON.parse((screen.getByLabelText('Operation settings (JSON)') as HTMLTextAreaElement).value);
  expect(settings).toMatchObject({minimum:1,maximum:2,cpuPercent:75});
- expect((screen.getByRole('button',{name:'Run production operation'}) as HTMLButtonElement).disabled).toBe(true);
+ expect((screen.getByRole('button',{name:'Run selected tool'}) as HTMLButtonElement).disabled).toBe(true);
  await user.type(screen.getByLabelText('Confirm production changes'),'source-env');
- await user.click(screen.getByRole('button',{name:'Run production operation'}));
+ await user.click(screen.getByRole('button',{name:'Run selected tool'}));
  expect((await screen.findByRole('alert')).textContent).toContain('Test backend error');
  expect(action).toHaveBeenCalledWith(project,'production',{action:'autoscale',configuration:settings,confirmation:'source-env'});
 });

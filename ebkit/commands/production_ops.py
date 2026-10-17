@@ -177,8 +177,6 @@ def owned_database(session,app):
 
 def database_create(session,eb,app,env,record,data):
     record = dict(record)
-    record.update(application_name=app, environment_name=env, region=session.region_name,
-                  account_id=session.client('sts').get_caller_identity()['Account'])
     ec2=session.client('ec2');rds=session.client('rds');vpc=data.get('vpcId');subnets=data.get('subnetIds',[]);source=data.get('applicationSecurityGroup')
     if not isinstance(vpc,str) or not re.fullmatch(r'vpc-[a-f0-9]+',vpc) or not isinstance(subnets,list) or not 2<=len(subnets)<=16 or any(not isinstance(item,str) or not re.fullmatch(r'subnet-[a-f0-9]+',item) for item in subnets) or len(set(subnets))!=len(subnets) or not isinstance(source,str) or not re.fullmatch(r'sg-[a-f0-9]+',source):raise click.UsageError('Provide vpcId, at least two subnetIds and applicationSecurityGroup.')
     rows=ec2.describe_subnets(SubnetIds=subnets).get('Subnets',[])
@@ -189,6 +187,8 @@ def database_create(session,eb,app,env,record,data):
     if type(size) is not int:raise click.UsageError('storageGb must be an integer.')
     if not isinstance(instance,str) or not re.fullmatch(r'db\.[a-z0-9]+\.[a-z0-9]+',instance):raise click.UsageError('Invalid RDS instance class.')
     if type(data.get('multiAz',False)) is not bool:raise click.UsageError('multiAz must be true or false.')
+    record.update(application_name=app, environment_name=env, region=session.region_name,
+                  account_id=session.client('sts').get_caller_identity()['Account'])
     identifier=db_id(app);tags=owner_tags(app,env)
     try:sg=ec2.create_security_group(GroupName=identifier,Description='Private EBKit PostgreSQL access',VpcId=vpc,TagSpecifications=[{'ResourceType':'security-group','Tags':tags}])['GroupId']
     except ClientError as error:
