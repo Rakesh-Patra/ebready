@@ -32,6 +32,13 @@ def main():
             page.get_by_role('dialog').wait_for()
             page.screenshot(path=str(output / '07-https-login.png'), full_page=True)
             shots.append(('07-https-login.png', 'Enabled sign-in dialog on the verified HTTPS origin'))
+            dialog = page.get_by_role('dialog')
+            dialog.get_by_label('Email address').fill('migration-check@example.invalid')
+            dialog.get_by_label('Password', exact=True).fill('not-a-real-account-password')
+            with page.expect_response(lambda response: '/insforge/api/auth/sessions' in response.url and response.request.method == 'POST') as validation:
+                dialog.get_by_role('button', name='Log in', exact=True).click()
+            assert validation.value.status in (400, 401, 422), 'Browser sign-in did not reach authentication validation.'
+            dialog.get_by_role('alert').wait_for()
             page.get_by_role('button', name='Close authentication', exact=True).click()
         page.get_by_role('button', name='Explore demo', exact=True).click()
         page.get_by_role('button', name='New deployment', exact=True).wait_for()

@@ -1,8 +1,10 @@
 import { createClient } from '@insforge/sdk';
+import { createInsforgeFetch } from './insforge-fetch';
 const publicConfig = typeof window === 'undefined' ? undefined : (window as Window & { __EBKIT_PUBLIC_CONFIG__?: { baseUrl: string; anonKey: string; publicDemo?: boolean } }).__EBKIT_PUBLIC_CONFIG__;
 export const publicDemo = publicConfig?.publicDemo === true;
 export const insforge = createClient({
-  baseUrl: typeof window === 'undefined' ? import.meta.env.VITE_INSFORGE_URL : `${window.location.origin}/insforge`,
+  baseUrl: typeof window === 'undefined' ? import.meta.env.VITE_INSFORGE_URL : window.location.origin,
+  fetch: typeof window === 'undefined' ? undefined : createInsforgeFetch(window.location.origin),
   anonKey: publicConfig?.anonKey || import.meta.env.VITE_INSFORGE_ANON_KEY,
 });
 export type Project = { id: string; user_id: string; name: string; repository: string; region: string; port: number; status: string; stage: number; replicas: number; revision: number; variable_names: string[]; created_at: string; plan?:'free_trial'|'paid_test';trial_started_at?:string;trial_expires_at?:string;trial_cleanup_state?:string; mode?: 'demo' | 'live'; application_name?: string; environment_name?: string; live_url?: string; health?: string; last_error?: string; operation_log?: string; last_operation?: string; operation_running?: boolean };

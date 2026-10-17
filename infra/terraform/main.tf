@@ -81,7 +81,7 @@ resource "aws_iam_role_policy" "github" {
   role = aws_iam_role.github.id
   policy = jsonencode({ Version = "2012-10-17", Statement = [
     { Effect = "Allow", Action = ["cloudformation:UpdateStack", "cloudformation:DescribeStacks", "cloudformation:DescribeStackEvents", "cloudformation:GetTemplate"], Resource = aws_cloudformation_stack.cluster.id },
-    { Effect = "Allow", Action = ["elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentHealth", "elasticbeanstalk:UpdateEnvironment", "elasticbeanstalk:DescribeEvents"], Resource = local.env_arn },
+    { Effect = "Allow", Action = ["elasticbeanstalk:ListTagsForResource", "elasticbeanstalk:DescribeEnvironments", "elasticbeanstalk:DescribeConfigurationSettings", "elasticbeanstalk:DescribeEnvironmentHealth", "elasticbeanstalk:UpdateEnvironment", "elasticbeanstalk:DescribeEvents"], Resource = local.env_arn },
     { Effect = "Allow", Action = ["elasticbeanstalk:DescribeApplicationVersions", "elasticbeanstalk:CreateApplicationVersion"], Resource = [local.app_arn, "arn:aws:elasticbeanstalk:${var.region}:${local.account}:applicationversion/${var.name}/*"] },
     { Effect = "Allow", Action = ["iam:GetRole"], Resource = [data.aws_iam_role.cluster.arn, data.aws_iam_role.node.arn, data.aws_iam_role.observability.arn, aws_iam_role.application.arn] },
     { Effect = "Allow", Action = ["iam:PassRole"], Resource = [data.aws_iam_role.cluster.arn, data.aws_iam_role.node.arn, data.aws_iam_role.observability.arn, aws_iam_role.application.arn], Condition = { StringEquals = { "iam:PassedToService" = ["elasticbeanstalk.amazonaws.com", "eks.amazonaws.com", "ec2.amazonaws.com", "pods.eks.amazonaws.com"] } } },

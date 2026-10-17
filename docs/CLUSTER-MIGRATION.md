@@ -72,3 +72,10 @@ SNS recipient is configured. Each of the four shared log groups has two explicit
 exceptions: AWS-managed encryption rather than customer KMS, and seven days of
 operational retention rather than a one-year audit archive. No blanket skip or
 soft-fail is used. Docker and Actions have no exceptions.
+
+Browser testing found that InsForge SDK 1.5.2 resolves absolute /api paths, dropping
+a base URL's /insforge prefix. A scoped SDK fetch transport now rewrites only
+same-origin authentication/database calls to the proxy. Tests exercise the real
+SDK and ensure unrelated application routes and external URLs stay unchanged.
+Deployment capture tests a nonexistent example.invalid account, expects normal
+credential validation, and never creates an account or submits real credentials.
