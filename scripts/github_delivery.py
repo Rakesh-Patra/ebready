@@ -7,6 +7,7 @@ import json
 import subprocess
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from pathlib import Path
 
 REPOSITORY = 'Rakesh-Patra/ebready'
@@ -21,14 +22,23 @@ def client():
     if not token:
         raise SystemExit('No GitHub credential is available through Git Credential Manager.')
 
-    def request(method, path, body=None):
+    class SafeRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+            if redirected and urlsplit(newurl).netloc != 'api.github.com':
+                redirected.remove_header('Authorization')
+            return redirected
+    opener = urllib.request.build_opener(SafeRedirect())
+
+    def request(method, path, body=None, raw=False):
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request('https://api.github.com' + path, data=data, method=method,
             headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
                      'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json'})
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                return json.loads(response.read() or '{}')
+            with opener.open(req, timeout=30) as response:
+                payload = response.read()
+                return payload if raw else json.loads(payload or '{}')
         except urllib.error.HTTPError as error:
             detail = json.loads(error.read() or '{}').get('message', 'GitHub request failed')
             raise RuntimeError(f'GitHub {method} {path}: HTTP {error.code}: {detail}') from None

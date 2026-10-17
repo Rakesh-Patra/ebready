@@ -14,9 +14,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY ebkit/ ./ebkit/
-RUN python3 -m venv /opt/ebkit && /opt/ebkit/bin/pip install --no-cache-dir '.[database]'
+RUN python3 -m venv /opt/ebkit \
+    && /opt/ebkit/bin/pip install --no-cache-dir --upgrade 'setuptools>=78.1.1' \
+    && /opt/ebkit/bin/pip install --no-cache-dir '.[database]'
 COPY web/package.json web/package-lock.json ./web/
-RUN cd web && npm ci --omit=dev && npm cache clean --force
+RUN cd web && npm ci --omit=dev && npm cache clean --force \
+    && rm -rf /usr/local/lib/node_modules/npm /opt/yarn* \
+    && rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/yarn /usr/local/bin/yarnpkg
 COPY web/server/ ./web/server/
 COPY --from=frontend /build/web/dist/ ./web/dist/
 RUN mkdir -p /app/web/server/.jobs && chown -R node:node /app/web/server/.jobs

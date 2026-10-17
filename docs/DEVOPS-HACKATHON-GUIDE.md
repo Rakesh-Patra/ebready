@@ -1,8 +1,8 @@
 # EBKit DevOps implementation and deployment
 
-Author: Rakesh Ku Patra  
-Task date: 17 October 2026 in Asia Kolkata  
-Repository: https://github.com/Rakesh-Patra/ebready  
+Author: Rakesh Ku Patra
+Task date: 17 October 2026 in Asia Kolkata
+Repository: https://github.com/Rakesh-Patra/ebready
 Branch: `feat/modern-workspace-deployment-improvements`
 
 This guide explains how an application idea becomes a tested Docker image and a
