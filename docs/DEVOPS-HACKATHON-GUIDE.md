@@ -1,8 +1,8 @@
 # EBKit DevOps implementation and deployment
 
-Author: Rakesh Ku Patra
-Task date: 17 October 2026 in Asia Kolkata
-Repository: https://github.com/Rakesh-Patra/ebready
+Author: Rakesh Ku Patra<br>
+Task date: 17 October 2026 in Asia Kolkata<br>
+Repository: https://github.com/Rakesh-Patra/ebready<br>
 Branch: `feat/modern-workspace-deployment-improvements`
 
 This guide explains how an application idea becomes a tested Docker image and a
@@ -368,82 +368,80 @@ CODEOWNERS and the owner's requested solo-maintainer branch protections.
 - [GitHub deployment environments](https://docs.github.com/en/actions/concepts/workflows-and-actions/deployment-environments)
 - [Terraform Elastic Beanstalk environment resource](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/elastic_beanstalk_environment)
 
-## Execution evidence
+## Verified execution: 17 October 2026
 
-Bootstrap completed with the standard Amazon Linux 2023 Docker environment.
-The first pipeline correctly blocked delivery because the image included vulnerable
-global npm tooling and Python setuptools 66.1.1. The Dockerfile was changed to
-remove package managers from the final runtime and upgrade setuptools. A fresh
-pipeline must confirm the remediation before the application release is accepted.
+[GitHub Actions run 39049823659](https://github.com/Rakesh-Patra/ebready/actions/runs/39049823659)
+completed successfully: **security, verify and deploy all passed**. The deploy job
+exchanged GitHub OIDC identity for temporary AWS credentials and deployed the
+already scanned image. No long-lived AWS access keys were stored in GitHub.
 
-CloudWatch provisioning completed with four new monitoring resources and three
-configuration updates. The Gemini and InsForge administration keys were stored
-in AWS Secrets Manager; their values were not printed, committed or passed to
-Terraform. The image remediation subsequently passed the security gate. OIDC role assumption
-then succeeded after the immutable subject was configured. A policy simulation
-confirmed that the delivery role cannot read the Gemini key or Terraform state,
-cannot create unrelated buckets, and can publish its own application image. S3
-metadata confirmed AES256 encryption and versioning for remote state. Beanstalk's standard
-regional storage bucket was initialized with the operator profile after its first
-application-version request exposed that bootstrap prerequisite.
+- Source commit: `6a0b24369220a7755307ca7390824cad7b611605`.
+- Beanstalk version: `release-6a0b24369220-39049823659-2`.
+- Environment: `ebkit-dashboard-practice`, Ready / Green.
+- ECR image digest: `sha256:be5d0f767b516235d38d9bce5b91aa986232b926f40dfc31d3a0c9b66afd112f`.
+- Live URL: http://ebkit-dashboard-practice.eba-cktxxx2w.us-east-2.elasticbeanstalk.com
+- Tests: **65 targeted Python tests and 224 frontend tests passed**.
+- Trivy source and image reports: zero findings under the configured fixed HIGH/CRITICAL vulnerability and secret gates; SBOM retained.
+- Exact Python runtime dependency audit: zero known vulnerabilities. Frontend production dependency audit passed.
+- Gitleaks history and local Semgrep rules: zero findings after the documented exact historical fixture exception.
+- Checkov: Terraform 41 passed / 0 failed / 7 documented resource-local skips; Docker 131 passed / 0 failed; Actions 148 passed / 0 failed.
+- Passive ZAP against the isolated application container: 63 passing checks, zero FAIL findings and four warning categories.
 
-Beanstalk version events exposed missing permissions on its regional platform
-bucket. The delivery policy now permits the required configuration operations
-on that exact bucket, runtime-object reads/writes beneath this environment's
-`resources/environments/ENVIRONMENT_ID/*` prefix, and source reads only
-beneath the custom release prefix. A comparison with successful operator S3 metadata
-also identified `resources/_runtime/_embedded_extensions/APPLICATION_NAME/*`;
-this app-scoped shared prefix is now included. No unrelated application's shared
-assets or environment prefixes are included.
-Optional
-application-version pre-processing is disabled for the Dockerrun-only Standard
-bundle; AWS documents that this step validates env.yaml and .ebextensions rather
-than Docker configuration. Six regression cases check the Standard API contract
-and reject failed versions regardless of status capitalization. Build, security
-scanning and post-deployment Ready/Green checks remain required.
+The ZAP warnings concern missing CSP, non-storable content, SPA coverage and
+cross-origin embedder policy. Passive scanning is limited coverage, especially
+for browser-driven authenticated flows. A PASS for an HTTP-inapplicable check
+such as HSTS does not establish HTTPS. These results do not assert zero risk.
 
-The verified CI run for commit `a001a930c4a351897db512ae18bf988f3e4f3292`
-passed 224 web tests and 58 targeted Python tests. The configured Trivy source and
-image gates reported zero vulnerabilities and zero secret findings; this is scoped
-to those scanners, severities and fixed-vulnerability settings, not a claim of
-zero security risk. The SBOM is preserved alongside the reports. S3's existing
-SSE-C encryption block is explicitly declared in Terraform to preserve the AWS
-security default and avoid repeated drift.
+Post-deployment smoke tests verified the homepage, built assets and API health.
+Authentication, deployment, repository and upload API requests were rejected with
+403 in public demo mode. The default endpoint remains **HTTP**: login and cloud/AI
+operations stay gated until a domain and ACM-backed HTTPS are configured.
 
-The final results for today's deployment are appended here after verification.
-Until that happens, infrastructure and workflow files are implementation evidence,
-not proof of a successful public application release.
+CloudWatch evidence contains nine application/platform log groups with seven-day
+retention, a dashboard, enhanced health and two alarms in OK state. Alarm
+notifications, application traces and memory metrics are follow-up work. Terraform's
+final full plan reported no changes. The deployed source is the commit above;
+subsequent documentation-only commits do not replace this release.
 
-A controlled diagnostic deployed the identical candidate through the bootstrap
-profile and reached Ready/Green on
-`release-f781d4cffd8a-39028523538-2`. This established that the image, source bundle
-and Standard environment can deploy. It is explicitly an operator deployment,
-not proof of successful GitHub OIDC application delivery; the latter still needs a
-successful delivery-job receipt. OIDC identity exchange and image publication had
-already succeeded before the remaining Beanstalk authorization failure.
+### Deployment troubleshooting and evidence boundaries
 
-The Git security extension was checked locally with seven staged-index tests, a
-browser security-header test, Gitleaks history scanning and seven local Semgrep
-rules. Checkov identified overly broad inventory reads, which were narrowed to
-specific APIs, and now passes Terraform with seven resource-local exceptions.
-The actual root Dockerfile and Actions workflow pass without Checkov exceptions.
-The exceptions retain AES256 encryption, the explicitly pinned demo platform and
-single-region scope; separate S3 data-access auditing and automatic platform
-maintenance remain production follow-ups. The enhanced-health exception records
-a confirmed Checkov 3.3.29 namespace mismatch, rather than changing valid AWS
-configuration to satisfy the scanner.
+Early image scans blocked vulnerable runtime build tooling. Removing unnecessary
+package managers and auditing the exact final Python inventory resolved the gate.
+The immutable repository/environment OIDC subject resolved initial trust failures.
+Beanstalk subsequently exposed downstream permissions needed for Standard Docker
+updates: the named platform bucket, this environment's runtime prefix, the
+application's embedded-extension prefix, launch-template inventory and
+SuspendProcesses/ResumeProcesses on this environment's Auto Scaling group only.
+Unrelated applications, secrets and Terraform state remain outside the delivery
+role's direct access. A deployment maintainer can nevertheless change application
+code that reads runtime secrets; Secrets Manager does not isolate secrets from
+trusted maintainers who control deployed code.
 
-GitHub read-back confirmed required PR/check enforcement for `main`, administrator
-enforcement, disabled force pushes/deletion, secret scanning, push protection and
-Dependabot security updates. Independent approval is intentionally not mandatory
-for this solo-maintainer repository. The tracked CODEOWNERS uses the GitHub handle;
-no personal email was published. Local hooks were installed and their staged scan
-passed. The new CI security gates still require a successful run before being
-reported as verified delivery evidence.
+An earlier operator-profile diagnostic deployed the identical candidate and
+proved the image and bundle worked. That was diagnostic evidence only. The final
+successful GitHub run linked above independently proves OIDC delivery. A previously
+queued retry of an older commit later replaced the active version; rerunning only
+the latest commit's OIDC deploy job restored the verified image. Do not retry older
+release jobs after a newer deployment without deliberately treating that as a rollback.
+Optional application-version pre-processing is disabled for the Dockerrun-only
+Standard bundle; six regression cases check that contract and reject failed
+versions regardless of capitalization. Build, scanning and Ready/Green checks
+remain mandatory.
 
-Local passive ZAP completed with 63 passing checks, zero FAIL findings and four
-warning categories retained in its report. The test ran the actual application
-image with a read-only root filesystem, temporary writable mounts, dropped Linux
-capabilities, no new privileges, and resource limits. Its disposable container and
-network were then removed. This is CI/local runtime evidence, not proof that those
-Docker flags are applied automatically by the live Beanstalk platform.
+GitHub read-back confirmed required pull requests and strict verify/security checks
+on main, administrator enforcement, disabled force pushes/deletion, secret scanning,
+push protection and Dependabot security updates. CODEOWNERS uses @Rakesh-Patra.
+Independent approvals are intentionally not mandatory for the solo-maintainer
+repository; enable them when another reviewer joins. The native commit hook is
+installed and its staged-index behavior has seven passing tests.
+
+The seven Terraform skips are explained in DEVSECOPS.md: encryption choices,
+single-region scope, absent S3 auditing/event consumers, pinned platform maintenance
+and a confirmed Checkov enhanced-health namespace mismatch. No Docker or Actions
+exceptions were needed. The read-only filesystem, dropped capabilities and resource
+limits were exercised on the isolated scan container; they are not automatically
+applied to live Beanstalk by Dockerrun v1.
+
+The screenshots and release receipt following this guide were captured from the
+real deployed application, public workflow run and actual passive-scan report.
+Runtime credentials, secret values and Terraform state are excluded.

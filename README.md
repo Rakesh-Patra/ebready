@@ -13,6 +13,7 @@ EBKit generates and checks Docker deployment kits and manages AWS Elastic Beanst
 For hosting this dashboard on Standard Elastic Beanstalk with the root Dockerfile,
 Terraform, GitHub OIDC, Secrets Manager and CloudWatch, follow the
 [DevOps implementation and deployment walkthrough](docs/DEVOPS-HACKATHON-GUIDE.md).
+Download the [verified walkthrough PDF with six real screenshots](docs/EBKit-DevOps-Guide.pdf).
 Its public demo disables login and cloud/AI operations until HTTPS is configured.
 This hosting setup is separate from the customer Cluster Mode deployment engine.
 See [Git and application security](docs/DEVSECOPS.md) for commit hooks, secret
