@@ -115,6 +115,8 @@ def _resolve_deployment(
     except (BotoCoreError, ClientError) as exc:
         raise click.ClickException(f"Could not inspect Elastic Beanstalk environment: {exc}") from exc
     environments = response.get("Environments", [])
+    if not environments and include_deleted and os.environ.get('EBKIT_HOSTED_REGION') == region and re.fullmatch(r'ebk-[0-9a-f]{16}', app) and environment == app + '-cluster':
+        return app, environment, record
     if not environments:
         raise click.ClickException(
             f"Elastic Beanstalk environment '{environment}' was not found in {region}."

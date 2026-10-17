@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,8 +18,38 @@ def get_state_path() -> Path:
     return Path.home() / ".ebkit" / "deployments.json"
 
 
+def _remote_state(path):
+    bucket = os.environ.get("EBKIT_STATE_S3_BUCKET")
+    if not bucket:
+        return None
+    if not re.fullmatch(r"[0-9a-f-]{36}\.json", path.name):
+        raise ValueError("Hosted deployment state requires a project UUID filename.")
+    import boto3
+    return boto3.client("s3"), bucket, "worker-state/" + path.name
+
+
+def _sync_state(path):
+    remote = _remote_state(path)
+    if remote:
+        client, bucket, key = remote
+        client.put_object(Bucket=bucket, Key=key, Body=path.read_bytes(), ServerSideEncryption="AES256", ContentType="application/json")
+
+
 def load_deployments(path: Path | None = None) -> list[dict[str, Any]]:
     state_path = path or get_state_path()
+    remote = _remote_state(state_path)
+    if remote:
+        client, bucket, key = remote
+        from botocore.exceptions import ClientError
+        try:
+            data = json.loads(client.get_object(Bucket=bucket, Key=key)['Body'].read())
+        except ClientError as error:
+            if error.response['Error']['Code'] in ('NoSuchKey', '404'):
+                return []
+            raise
+        if not isinstance(data, dict) or not isinstance(data.get('deployments'), list):
+            raise ValueError('Invalid remote deployment metadata.')
+        return [item for item in data['deployments'] if isinstance(item, dict)]
     if not state_path.exists():
         return []
     try:
@@ -76,6 +107,7 @@ def save_deployment(
             raise
         if os.name != "nt":
             os.chmod(state_path, 0o600)
+        _sync_state(state_path)
     finally:
         if temp_path and temp_path.exists():
             temp_path.unlink()
@@ -118,6 +150,7 @@ def remove_deployment(
         temp_path.replace(state_path)
         if os.name != "nt":
             os.chmod(state_path, 0o600)
+        _sync_state(state_path)
     finally:
         if temp_path and temp_path.exists():
             temp_path.unlink()

@@ -53,6 +53,10 @@ def main():
         raise SystemExit('Target environment is not Ready. Inspect it before retrying.')
     if current[0].get('Tier', {}).get('Type') != 'EKS':
         raise SystemExit('Delivery requires a Cluster environment; refusing Standard deployment.')
+    # Refuse application delivery while this single worker is changing AWS resources.
+    with urlopen('https://' + current[0]['CNAME'] + '/api/health', timeout=20) as response:
+        if json.load(response).get('recoveringJobs', 0):
+            raise SystemExit('The hosted worker has an active operation. Retry delivery after it finishes.')
     previous = current[0].get('VersionLabel')
     output = Path('artifacts'); output.mkdir(exist_ok=True)
     receipt = {'startedAt': datetime.now(timezone.utc).isoformat(), 'application': app, 'environment': env,
@@ -81,8 +85,9 @@ def main():
         receipt['homepageStatus'] = response.status
     with urlopen(url + '/api/health', timeout=20) as response:
         health = json.load(response)
-        assert response.status == 200 and health['liveEnabled'] is False
+        assert response.status == 200 and health['liveEnabled'] is (os.environ.get('EBKIT_EXPECT_LIVE_ENABLED', 'false') == 'true')
         receipt['healthStatus'] = response.status
+        receipt['liveEnabled'] = health['liveEnabled']
     asset = re.search(r'<script[^>]+src="([^"]+)"', html)
     assert asset, 'No built JavaScript asset was served.'
     asset_url = urljoin(url + '/', asset[1])
@@ -107,7 +112,7 @@ def main():
     summary = os.environ.get('GITHUB_STEP_SUMMARY')
     if summary:
         with open(summary, 'a') as stream:
-            stream.write(f'### Verified HTTPS Cluster release\n\n{url}\n\nVersion `{version}` is Ready/{row.get('Health')}; homepage, health and JavaScript asset returned HTTP 200. HTTPS and the authentication proxy are enabled; live cloud operations remain disabled.\n')
+            stream.write(f'### Verified HTTPS Cluster release\n\n{url}\n\nVersion `{version}` is Ready/{row.get('Health')}; homepage, health and JavaScript asset returned HTTP 200. HTTPS and the authentication proxy are enabled; live worker configuration matches the declared deployment setting.\n')
 
 
 if __name__ == '__main__':

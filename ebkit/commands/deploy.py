@@ -195,7 +195,12 @@ def _ensure_iam_role(iam_client, role_name: str, service: str, policies: List[st
             RoleName=role_name,
             AssumeRolePolicyDocument=json.dumps(trust),
             Description="Created by EBKit for Elastic Beanstalk Cluster Mode",
+            **({"PermissionsBoundary": os.environ["EBKIT_BUILD_PERMISSIONS_BOUNDARY"]} if service == "codebuild.amazonaws.com" and os.environ.get("EBKIT_BUILD_PERMISSIONS_BOUNDARY") else {}),
         )["Role"]
+
+    boundary = os.environ.get("EBKIT_BUILD_PERMISSIONS_BOUNDARY") if service == "codebuild.amazonaws.com" else None
+    if boundary and role.get("PermissionsBoundary", {}).get("PermissionsBoundaryArn") != boundary:
+        raise click.ClickException("Existing build role lacks the hosted permissions boundary; operator review is required.")
 
     for policy_arn in policies:
         iam_client.attach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
@@ -222,6 +227,15 @@ def _provision_cluster_infrastructure(account_id: str, region: str) -> Dict:
     _info("Checking the IAM roles and network required for Cluster Mode...")
     iam = boto3.client("iam")
     ec2 = boto3.client("ec2", region_name=region)
+    configured = os.environ.get("EBKIT_PREPROVISIONED_ROLES")
+    if configured:
+        roles = json.loads(configured)
+        required = {"cluster_role", "node_role", "observability_role"}
+        if set(roles) != required or any(not re.fullmatch(r"arn:aws:iam::" + account_id + r":role/[A-Za-z0-9+=,.@_/-]+", value) for value in roles.values()):
+            raise click.ClickException("Invalid operator-provisioned Cluster roles.")
+        _, subnets = _get_default_vpc_subnets(ec2)
+        return {**roles, "subnets": subnets}
+
     roles = {
         name: _ensure_iam_role(
             iam, _CLUSTER_ROLES[name], service, _CLUSTER_POLICIES[name]
@@ -479,7 +493,6 @@ def _build_cluster_option_settings(
     options = [
         {"Namespace": "aws:elasticbeanstalk:eks", "OptionName": "cluster-role", "Value": infra["cluster_role"]},
         {"Namespace": "aws:elasticbeanstalk:eks", "OptionName": "node-role", "Value": infra["node_role"]},
-        {"Namespace": "aws:elasticbeanstalk:eks:environment", "OptionName": "operation-role", "Value": infra["operation_role"]},
         {"Namespace": "aws:elasticbeanstalk:eks:environment", "OptionName": "observability-role", "Value": infra["observability_role"]},
         {"Namespace": "aws:elasticbeanstalk:eks:environment", "OptionName": "service-port", "Value": str(port)},
         {"Namespace": "aws:elasticbeanstalk:eks:environment", "OptionName": "arch", "Value": "amd64"},
@@ -722,6 +735,11 @@ def _execute_deploy(
     app = app or previous.get("application_name") or repo_name.lower().replace("_", "-")
     env = env or previous.get("environment_name") or f"{app}-cluster"
     port = port if port is not None else previous.get("port", 8080)
+    if os.environ.get("EBKIT_HOSTED_REGION"):
+        if region != os.environ["EBKIT_HOSTED_REGION"] or not re.fullmatch(r"ebk-[0-9a-f]{16}", app) or env != app + "-cluster":
+            raise click.ClickException("Hosted deployments require an EBKit-generated target in the configured region.")
+        max_replicas = 1
+
 
     env_vars = _collect_env_vars(env_file, extra_env, is_interactive)
     if database_plan and any(env_vars.get(name, '').strip() for name in database_plan['variables']):

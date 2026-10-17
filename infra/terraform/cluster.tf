@@ -50,12 +50,15 @@ locals {
     { Namespace = "aws:elasticbeanstalk:eks:alb", OptionName = "listen-ports", Value = jsonencode([{ HTTPS = 443 }, { HTTP = 80 }]) },
     { Namespace = "aws:elasticbeanstalk:eks:environment:autoscaling", OptionName = "min-replica", Value = "1" },
     { Namespace = "aws:elasticbeanstalk:eks:environment:autoscaling", OptionName = "max-replica", Value = "1" },
-    { Namespace = "aws:elasticbeanstalk:eks:environment:deployment", OptionName = "strategy", Value = "RollingUpdate" },
+    { Namespace = "aws:elasticbeanstalk:eks:environment:deployment", OptionName = "strategy", Value = "Recreate" },
     { Namespace = "aws:elasticbeanstalk:eks:environment:readiness-probe", OptionName = "enabled", Value = "true" },
     { Namespace = "aws:elasticbeanstalk:eks:alb", OptionName = "healthcheck-path", Value = "/api/health" },
     { Namespace = "aws:elasticbeanstalk:eks:environment:readiness-probe", OptionName = "http-path", Value = "/api/health" },
     { Namespace = "aws:elasticbeanstalk:eks:environment", OptionName = "env-variables", Value = jsonencode(merge(var.public_configuration, {
-      EBKIT_WEB_ORIGINS = var.cluster_web_origin, EBKIT_PUBLIC_DEMO = tostring(!var.cluster_login_enabled), EBKIT_LIVE_ENABLED = "false", EBKIT_GITHUB_AUTO_DEPLOY = "false"
+      EBKIT_WEB_ORIGINS                = var.cluster_web_origin, EBKIT_PUBLIC_DEMO = tostring(!var.cluster_login_enabled), EBKIT_LIVE_ENABLED = tostring(var.cluster_live_enabled), EBKIT_GITHUB_AUTO_DEPLOY = "false", EBKIT_STATE_S3_BUCKET = aws_s3_bucket.releases.id, EBKIT_GLOBAL_CAPACITY = "1", EBKIT_HOSTED_REGION = var.region,
+      AWS_REGION                       = var.region, AWS_DEFAULT_REGION = var.region, EBKIT_AWS_ACCOUNT_ID = local.account,
+      EBKIT_BUILD_PERMISSIONS_BOUNDARY = aws_iam_policy.build_boundary.arn,
+      EBKIT_PREPROVISIONED_ROLES       = jsonencode({ cluster_role = data.aws_iam_role.cluster.arn, node_role = data.aws_iam_role.node.arn, observability_role = data.aws_iam_role.observability.arn })
     })) },
     { Namespace = "aws:elasticbeanstalk:eks:environment", OptionName = "secrets", Value = jsonencode(var.secret_arns) }
   ])
@@ -81,5 +84,5 @@ resource "aws_cloudformation_stack" "cluster" {
     delete = "40m"
   }
   lifecycle { ignore_changes = [parameters["VersionLabel"]] }
-  depends_on = [aws_iam_role_policy.application]
+  depends_on = [aws_iam_role_policy.application, aws_iam_role_policy.hosted_worker]
 }

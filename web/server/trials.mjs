@@ -1,9 +1,9 @@
 export const trialColumns='id,user_id,name,repository,region,port,mode,status,application_name,environment_name,replicas,revision,plan,trial_reserved_at,trial_started_at,trial_expires_at,trial_cleanup_state,trial_cleanup_next_at,trial_cleanup_attempts';
 export const isTimedPlan=plan=>plan==='free_trial'||plan==='paid_test';
 const fail=(status,message)=>Object.assign(new Error(message),{status});
-export function createTrials({admin,save,run,isBusy,now=Date.now,capacity=2,testingEmails=[],evaluatorEmails=[],paidTestEmails=[],allowedEmails=[]}){
+export function createTrials({admin,save,run,isBusy,now=Date.now,capacity=2,testingEmails=[],evaluatorEmails=[],paidTestEmails=[],allowedEmails=[],strictCapacity=false}){
   let ticking=false;
-  async function reserve(project,user,{paidTest=false}={}){
+  async function reserveInternal(project,user,{paidTest=false}={}){
     const {operator_test:ignored,operator_evaluator:ignoredEvaluator,operator_paid_test:ignoredPaidTest,...safeProject}=project;
     if(user?.id&&user.id===project.user_id&&testingEmails.includes(user.email?.toLowerCase()))safeProject.operator_test=true;
     if(user?.id&&user.id===project.user_id&&evaluatorEmails.includes(user.email?.toLowerCase())){safeProject.operator_test=true;safeProject.operator_evaluator=true;}
@@ -15,6 +15,18 @@ export function createTrials({admin,save,run,isBusy,now=Date.now,capacity=2,test
     if(error){const message=JSON.stringify(error);if(message.includes('TEST_CAPACITY_FULL'))throw fail(409,'Your 10 testing slots are occupied or awaiting cleanup. Wait for a slot to finish cleanup.');if(message.includes('PAID_TEST_ACTIVE'))throw fail(409,'Finish cleanup of your active test pass before creating another live deployment.');if(message.includes('TRIAL_USED'))throw fail(403,'Your one free trial has already been used.');if(message.includes('CAPACITY_FULL'))throw fail(429,'All trial slots are occupied or awaiting cleanup. Try again later.');throw fail(503,'Could not reserve a trial. Deployment was not started.');}
     if(!data?.id||(safeProject.operator_paid_test&&data.plan!=='paid_test')||(!safeProject.operator_evaluator&&!data.trial_expires_at)||(safeProject.operator_evaluator&&!safeProject.operator_paid_test&&(data.plan==='free_trial'||data.trial_expires_at)))throw fail(503,'Deployment reservation could not be verified.');
     return data;
+  }
+  let reserving=false;
+  async function reserve(project,user,options={}){
+    if(!strictCapacity)return reserveInternal(project,user,options);
+    if(reserving)throw fail(409,'Another deployment is being reserved. Try again shortly.');
+    reserving=true;
+    try{
+      const {data,error}=await admin.database.from('ebkit_web_projects').select('id,status,plan,trial_cleanup_state').eq('mode','live').limit(101);
+      if(error||!data||data.length>100)throw fail(503,'Could not verify hosted trial capacity.');
+      if(data.filter(p=>p.status!=='destroyed'||(isTimedPlan(p.plan)&&p.trial_cleanup_state!=='complete')).length>=capacity)throw fail(429,'The hosted trial slot is in use or awaiting cleanup.');
+      return await reserveInternal(project,user,options);
+    }finally{reserving=false;}
   }
   async function start(id){const {data,error}=await admin.database.rpc('ebkit_start_trial',{p_id:id});if(error||!data?.trial_expires_at)throw fail(503,'Could not save the trial deadline.');return data;}
   function guard(project,operation,body,user=null,existing=false){

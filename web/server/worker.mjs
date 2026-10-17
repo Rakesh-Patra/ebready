@@ -110,7 +110,7 @@ export async function createWorker(config, dependencies = {}) {
   const release = recover ? await lockJobs(directoryRoot) : async () => {};
   let launches = 0, zipReplacing = false;
   const replacementAuthorization=Symbol('ZIP replacement');
-  const trials=config.trialsEnabled!==false&&config.liveEnabled&&admin?createTrials({admin,save,run,isBusy:()=>running.size>0||zipReplacing,capacity:config.globalCapacity??2,testingEmails:config.testingEmails??[],evaluatorEmails:config.evaluatorEmails??[],paidTestEmails:config.paidTestEmails??[],allowedEmails:config.allowedEmails??[],now:dependencies.now??Date.now}):null;
+  const trials=config.trialsEnabled!==false&&config.liveEnabled&&admin?createTrials({admin,save,run,isBusy:()=>running.size>0||zipReplacing,capacity:config.globalCapacity??2,strictCapacity:!!config.hostedRegion,testingEmails:config.testingEmails??[],evaluatorEmails:config.evaluatorEmails??[],paidTestEmails:config.paidTestEmails??[],allowedEmails:config.allowedEmails??[],now:dependencies.now??Date.now}):null;
   const githubDeploys=config.githubAutoDeploy!==false&&config.liveEnabled&&admin?createGithubDeploys({
     directory:directoryRoot,request:dependencies.fetch,token:config.githubToken,
     isBusy:()=>closing||running.size>0||zipReplacing,
@@ -136,6 +136,7 @@ export async function createWorker(config, dependencies = {}) {
     if (!token||['null','undefined'].includes(token)||token.length>8192) throw new HttpError(401, 'Log in to continue.');
     let user;try{user=await authenticate(token);}catch{throw new HttpError(401,'Your session is invalid or expired. Log in again.');}
     if(!user?.id)throw new HttpError(401,'Log in to continue.');
+    if(config.hostedRegion && user.emailVerified !== true)throw new HttpError(403,'Verify your email before using hosted deployments.');
     if (!config.allowedEmails.includes(user.email?.toLowerCase())) throw new HttpError(403, 'This account is not enabled for deployments on this AWS account.');
     return user;
   }
@@ -363,6 +364,7 @@ export async function createWorker(config, dependencies = {}) {
       if(route==='/api/profiles')return reply(200,{profiles:config.awsAccountId?config.awsProfiles??[]:[]});
       if(route==='/api/trial')return reply(200,{...(trials?await trials.account(user):{approved:true,trialUsed:false,durationMinutes:null,paidTestAvailable:false,paidTestDurationMinutes:120}),managedDatabaseRegions:databaseRegions(config,user)});
       if (route === '/api/deploy') {
+        if(config.hostedRegion && body.region !== config.hostedRegion)throw new HttpError(400,`This hosted pilot supports ${config.hostedRegion}.`);
         if (body.confirmCosts !== true) throw new HttpError(400, 'Confirm that AWS resources incur charges.');
         if(body.testPaidPass===true&&!(config.paidTestEmails??[]).includes(user.email?.toLowerCase()))throw new HttpError(403,'The two-hour test pass is not enabled for this account.');
         if (running.size||zipReplacing) throw new HttpError(409, 'Another cloud operation is running.');

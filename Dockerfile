@@ -11,6 +11,11 @@ RUN npm run build
 FROM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
+# Cluster Mode image registration requires a CLI newer than the SDK's service model.
+RUN python3 -c "import urllib.request,hashlib,zipfile; p='/tmp/awscli.zip'; urllib.request.urlretrieve('https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.37.10.zip',p); assert hashlib.sha256(open(p,'rb').read()).hexdigest()=='1aaed142cb63294e41ef70431fe9c602dbb869f8a21b6b8fc9d5ffd53b5c9235'; zipfile.ZipFile(p).extractall('/tmp/awscli')" \
+    && chmod +x /tmp/awscli/aws/install /tmp/awscli/aws/dist/aws /tmp/awscli/aws/dist/aws_completer \
+    && /tmp/awscli/aws/install --install-dir /opt/aws-cli --bin-dir /usr/local/bin \
+    && rm -rf /tmp/awscli /tmp/awscli.zip
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY ebkit/ ./ebkit/
