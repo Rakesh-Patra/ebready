@@ -36,6 +36,30 @@ hosted policy covers the core build/deployment lifecycle. Advanced commands that
 need additional AWS services are not yet verified in the hosted environment;
 local availability alone does not establish that they work on AWS.
 
+## Verification on 18 October 2026
+
+The local role configuration was synchronized to four separate Secrets Manager
+entries and applied through Terraform. The hosted HTTPS health endpoint reported
+`liveEnabled: true`; unauthenticated trial requests returned HTTP 401.
+
+A disposable public sample was built with CodeBuild, pushed to ECR, and deployed
+to Beanstalk Cluster using a temporary STS role with the exact worker provisioning
+policy. It reached Ready/Green and returned HTTP 200 over verified HTTPS. These
+commands exited successfully against that real environment: `status`, `logs`,
+`versions`, `resources`, `events`, `health`, `options`, `config`, and `scale`.
+The scaling check retained one replica.
+
+`destroy` then removed the sample environment, ECR repository/images, CodeBuild
+project/log group, empty application/versions, and eligible environment streams.
+`cleanup-status --json` confirmed `cleanup_complete: true`,
+`environment_deleted: true`, and `shared_cluster_retained: true`. The EKS cluster
+hosting EBKit was retained. Do not delete shared infrastructure for tenant cleanup.
+
+Local validation passed 233 frontend/server tests, 33 targeted Python checks, the
+production UI build, and Terraform validation. Raw AWS receipts remain in ignored
+local artifacts because they contain account/resource metadata. This exercise did
+not sign in as each real user or verify advanced RDS/budget integrations.
+
 ## AWS permissions and secrets
 
 The runtime uses EKS Pod Identity, not stored AWS access keys. Its provisioning
