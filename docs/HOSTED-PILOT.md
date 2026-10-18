@@ -75,6 +75,14 @@ two approved accounts, two repeat testers, one evaluator, and one paid-test acco
 The deployed CloudFormation secret references matched all four lists. Accounts
 keep their own role; approval does not automatically grant evaluator privileges.
 
+An additional 78 HTTP-worker regression cases compare local and hosted behavior
+for those role combinations. They cover status, logs, versions, resources, events,
+health, options, configuration, rollback, scaling, version deletion, destruction,
+timed-plan scaling restrictions, and cross-owner rejection. Together with the
+trial/hosted-worker suite, all 102 targeted tests passed. These tests use synthetic
+authenticated identities and a mocked CLI process; they verify authorization and
+command dispatch, not a real sign-in as either account or every underlying AWS API.
+
 ## AWS permissions and secrets
 
 The runtime uses EKS Pod Identity, not stored AWS access keys. Its provisioning
