@@ -60,6 +60,21 @@ production UI build, and Terraform validation. Raw AWS receipts remain in ignore
 local artifacts because they contain account/resource metadata. This exercise did
 not sign in as each real user or verify advanced RDS/budget integrations.
 
+The hosted Google login initially failed because the HTTPS callback was absent
+from the actual EBKit backend allowlist. A CLI connection in another directory
+pointed to a different backend, so editing that project's config did not fix EBKit.
+The current official InsForge CLI was used with an isolated connection matching
+the deployed `INSFORGE_URL`. Its reviewed plan added only the hosted callback and
+preserved all four local callbacks. The apply reported no skipped fields. A real
+request through EBKit's `/insforge/api/auth/oauth/google` then returned HTTP 200
+with a Google authorization URL. Compare the CLI backend URL with the app's URL
+before applying auth settings; never commit CLI connection files or admin keys.
+
+All deployed role secret values were compared privately with local configuration:
+two approved accounts, two repeat testers, one evaluator, and one paid-test account.
+The deployed CloudFormation secret references matched all four lists. Accounts
+keep their own role; approval does not automatically grant evaluator privileges.
+
 ## AWS permissions and secrets
 
 The runtime uses EKS Pod Identity, not stored AWS access keys. Its provisioning
