@@ -746,9 +746,8 @@ def _execute_deploy(
     env = env or previous.get("environment_name") or f"{app}-cluster"
     port = port if port is not None else previous.get("port", 8080)
     if os.environ.get("EBKIT_HOSTED_REGION"):
-        if region != os.environ["EBKIT_HOSTED_REGION"] or not re.fullmatch(r"ebk-[0-9a-f]{16}", app) or env != app + "-cluster":
+        if region != os.environ["EBKIT_HOSTED_REGION"] or not re.fullmatch(r"ebk-[0-9a-f]{16}", app) or not re.fullmatch(r"ebk-[0-9a-f]{16}-cluster", env):
             raise click.ClickException("Hosted deployments require an EBKit-generated target in the configured region.")
-        max_replicas = 1
 
 
     env_vars = _collect_env_vars(env_file, extra_env, is_interactive)

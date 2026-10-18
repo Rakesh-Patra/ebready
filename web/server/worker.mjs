@@ -110,7 +110,7 @@ export async function createWorker(config, dependencies = {}) {
   const release = recover ? await lockJobs(directoryRoot) : async () => {};
   let launches = 0, zipReplacing = false;
   const replacementAuthorization=Symbol('ZIP replacement');
-  const trials=config.trialsEnabled!==false&&config.liveEnabled&&admin?createTrials({admin,save,run,isBusy:()=>running.size>0||zipReplacing,capacity:config.globalCapacity??2,strictCapacity:!!config.hostedRegion,testingEmails:config.testingEmails??[],evaluatorEmails:config.evaluatorEmails??[],paidTestEmails:config.paidTestEmails??[],allowedEmails:config.allowedEmails??[],now:dependencies.now??Date.now}):null;
+  const trials=config.trialsEnabled!==false&&config.liveEnabled&&admin?createTrials({admin,save,run,isBusy:()=>running.size>0||zipReplacing,capacity:config.globalCapacity??2,strictCapacity:config.strictCapacity===true,testingEmails:config.testingEmails??[],evaluatorEmails:config.evaluatorEmails??[],paidTestEmails:config.paidTestEmails??[],allowedEmails:config.allowedEmails??[],now:dependencies.now??Date.now}):null;
   const githubDeploys=config.githubAutoDeploy!==false&&config.liveEnabled&&admin?createGithubDeploys({
     directory:directoryRoot,request:dependencies.fetch,token:config.githubToken,
     isBusy:()=>closing||running.size>0||zipReplacing,
