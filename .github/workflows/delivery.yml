@@ -77,7 +77,7 @@ jobs:
           EBKIT_TEST_PYTHON="$(command -v python)" npm test -- --pool=threads --maxWorkers=1 --testTimeout=15000
           npm run build
           npm audit --omit=dev --audit-level=high
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: '1.14.9'
       - name: Validate infrastructure without AWS credentials
