@@ -132,7 +132,10 @@ def test_clone_rejects_existing_destination_before_creation(setup):
  eb.create_environment.assert_not_called()
 
 
-def test_profile_is_scoped_to_one_cli_invocation(monkeypatch):
+def test_profile_is_scoped_to_one_cli_invocation(monkeypatch, tmp_path):
+ config = tmp_path / "aws-config"
+ config.write_text("[profile selected]\nregion = us-east-2\n", encoding="utf-8")
+ monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
  monkeypatch.setenv('AWS_PROFILE','original')
  @click.command('profile-probe')
  def probe():click.echo(os.environ.get('AWS_PROFILE'))
@@ -154,7 +157,10 @@ def test_worker_profile_cannot_switch_to_another_aws_account(monkeypatch):
     assert deploy_module._check_aws_credentials()[0] is False
 
 
-def test_profile_clears_cached_sdk_session_and_restores_it(monkeypatch):
+def test_profile_clears_cached_sdk_session_and_restores_it(monkeypatch, tmp_path):
+    config = tmp_path / "aws-config"
+    config.write_text("[profile selected]\nregion = us-east-2\n", encoding="utf-8")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
     import boto3
     original=object();monkeypatch.setattr(boto3,"DEFAULT_SESSION",original)
     @click.command("profile-cache-probe")

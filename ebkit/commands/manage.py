@@ -1,6 +1,7 @@
 """Terminal controls for Beanstalk Cluster applications."""
 from functools import wraps
 import json
+import os
 
 import click
 from botocore.exceptions import BotoCoreError, ClientError
@@ -186,6 +187,13 @@ def cleanup_status_command(app, environment_name, region, as_json=False):
     if not as_json:
         click.echo(f"Environment: {record.get('environment_name')}")
         click.echo(f"Last recorded cleanup: {record.get('artifact_cleanup', 'Not recorded')}")
+    if os.environ.get("EBKIT_HOSTED_REGION"):
+        active = session.client('elasticbeanstalk').describe_environments(
+            EnvironmentNames=[record['environment_name']], IncludeDeleted=False).get('Environments', [])
+        report.update(environment_deleted=not active, shared_cluster_retained=True,
+            cleanup_complete=not active and record.get('artifact_cleanup') == 'Completed eligible cleanup')
+        click.echo(json.dumps(report) if as_json else 'Hosted tenant cleanup verified; shared control-plane cluster is retained.' if report['cleanup_complete'] else 'Hosted tenant cleanup is still pending.')
+        return
     cluster = record.get("cluster_arn")
     if not cluster:
         if as_json:

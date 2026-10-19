@@ -10,6 +10,16 @@ EBKit generates and checks Docker deployment kits and manages AWS Elastic Beanst
 
 **Start here:** [Features explained simply](docs/FEATURES.md) | [CLI guide](docs/CLI.md) | [Web guide](web/README.md) | [Database, monitoring and cost tools](docs/OPERATIONS.md) | [Initialization](docs/initialization.md)
 
+For hosting this dashboard on Standard Elastic Beanstalk with the root Dockerfile,
+Terraform, GitHub OIDC, Secrets Manager and CloudWatch, follow the
+[DevOps implementation and deployment walkthrough](docs/DEVOPS-HACKATHON-GUIDE.md).
+The current infrastructure follows the [HTTPS Cluster Mode migration](docs/CLUSTER-MIGRATION.md).
+Download the [verified walkthrough PDF with seven real screenshots](docs/EBKit-DevOps-Guide.pdf).
+Its public demo disables login and cloud/AI operations until HTTPS is configured.
+This hosting setup is separate from the customer Cluster Mode deployment engine.
+See [Git and application security](docs/DEVSECOPS.md) for commit hooks, secret
+scanning, SAST/SCA, Checkov, passive DAST and the solo-maintainer protection policy.
+
 Automated tests cover local behavior and mocked AWS integrations. Live AWS integration tests are still required. AWS resources incur charges; external databases and snapshots persist independently of environment teardown. Cost reports explicitly identify attribution limits.
 
 ---
@@ -49,6 +59,13 @@ ebkit --help
 
 On macOS or Linux, use `python3 -m pip install .` instead of `py -m pip install .`.
 To install the latest development version later, go to the cloned `ebready` folder and run the install command again. A PyPI package is not currently published.
+
+AWS connections automatically use the operating system's trusted certificates.
+Website users do not need to configure certificate files; the deployment worker
+handles TLS. An operator's explicit `AWS_CA_BUNDLE` or AWS profile `ca_bundle`
+still takes precedence. Readiness checks retry brief connection failures without
+starting another deployment. If checking remains unavailable, check the existing
+environment's Status before redeploying.
 
 ## First deployment: quick start
 
@@ -326,7 +343,7 @@ For Devboard-specific connection settings and deployment instructions, see
 
 ## Initialize and deploy a ZIP
 
-The website detects a suggested container port before preparation; review and correct it. Existing ZIP projects offer **Upload ZIP & redeploy** to update the same environment and URL. CLI users can deploy a new reviewed ZIP with the same `--app` and `--environment`. GitHub links remain deployment-only. Automatic deployment on GitHub push is planned for GitHub projects only; ZIP updates are manual.
+The website detects a suggested container port before preparation; review and correct it. Existing ZIP projects offer **Upload ZIP & redeploy** to update the same environment and URL. CLI users can deploy a new reviewed ZIP with the same `--app` and `--environment`. GitHub pushes automatically redeploy active website projects while the worker is running; use `ebkit watch` for CLI projects. ZIP updates are manual.
 
 
 ```powershell

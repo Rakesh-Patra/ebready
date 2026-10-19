@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 420" role="img" aria-labelledby="title desc">
+  <title id="title">EBKit secure delivery architecture</title>
+  <desc id="desc">GitHub source passes tests and security scans before OIDC authorizes an immutable image release to Standard Elastic Beanstalk. Terraform manages infrastructure, Secrets Manager serves the instance role, and CloudWatch records operation.</desc>
+  <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="#64786e"/></marker></defs>
+  <rect width="800" height="420" rx="16" fill="#f4f7f5"/>
+  <g font-family="Arial,sans-serif" fill="#162b20">
+    <text x="28" y="36" font-size="20" font-weight="700">Source to a verified AWS release</text>
+    <text x="28" y="59" font-size="12" fill="#52695c">Security gates run before cloud credentials are requested.</text>
+    <g fill="#fff" stroke="#b9cec0">
+      <rect x="28" y="86" width="162" height="70" rx="9"/><rect x="222" y="86" width="162" height="70" rx="9"/>
+      <rect x="416" y="86" width="162" height="70" rx="9"/><rect x="610" y="86" width="162" height="70" rx="9"/>
+      <rect x="28" y="209" width="225" height="75" rx="9"/><rect x="286" y="209" width="225" height="75" rx="9"/>
+      <rect x="544" y="209" width="228" height="75" rx="9"/>
+      <rect x="28" y="328" width="225" height="61" rx="9"/><rect x="286" y="328" width="225" height="61" rx="9"/>
+      <rect x="544" y="328" width="228" height="61" rx="9"/>
+    </g>
+    <g font-size="14" font-weight="700" text-anchor="middle">
+      <text x="109" y="115">GitHub pull request</text><text x="303" y="115">Tests and security</text>
+      <text x="497" y="115">Scanned image</text><text x="691" y="115">OIDC deployment</text>
+      <text x="140" y="238">ECR + private S3</text><text x="398" y="238">Standard Beanstalk</text><text x="658" y="238">Verify the release</text>
+      <text x="140" y="352">Terraform</text><text x="398" y="352">Secrets Manager</text><text x="658" y="352">CloudWatch</text>
+    </g>
+    <g font-size="11" text-anchor="middle" fill="#52695c">
+      <text x="109" y="136">Protected main / CODEOWNERS</text><text x="303" y="136">SAST · SCA · IaC · passive DAST</text>
+      <text x="497" y="136">Same artifact + SBOM</text><text x="691" y="136">Short-lived AWS role session</text>
+      <text x="140" y="259">Image digest + Dockerrun bundle</text><text x="398" y="259">One nonroot Docker application</text>
+      <text x="658" y="259">Ready/Green + HTTP smoke checks</text>
+      <text x="140" y="372">IAM / storage / host / monitoring</text><text x="398" y="372">Only the instance reads runtime keys</text>
+      <text x="658" y="372">Metrics / logs / health alarms</text>
+    </g>
+  </g>
+  <g stroke="#64786e" stroke-width="2" fill="none" marker-end="url(#arrow)">
+    <path d="M190 121H216"/><path d="M384 121H410"/><path d="M578 121H604"/>
+    <path d="M691 156V184H140V203"/><path d="M253 246H280"/><path d="M511 246H538"/>
+    <path d="M140 328V290"/><path d="M398 328V290"/><path d="M511 275H528V310H658V322"/>
+  </g>
+</svg>

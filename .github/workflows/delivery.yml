@@ -1,0 +1,249 @@
+name: EBKit CI DevSecOps and OIDC deployment
+
+on:
+  push:
+    branches: [main, feat/modern-workspace-deployment-improvements]
+    paths-ignore: ['docs/**', '**/*.md']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: delivery-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Scan full Git history with pinned Gitleaks
+        run: |
+          mkdir -p artifacts/security "$RUNNER_TEMP/security-bin"
+          curl --fail --silent --show-error --location --retry 3 https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o "$RUNNER_TEMP/gitleaks.tar.gz"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/security-bin" gitleaks
+          "$RUNNER_TEMP/security-bin/gitleaks" git . --redact --no-banner --config .gitleaks.toml --report-format json --report-path artifacts/security/gitleaks.json
+      - name: Install pinned source and infrastructure scanners
+        run: python -m pip install -r security/requirements.txt
+      - name: SAST using reviewed local Semgrep rules
+        run: semgrep scan --config security/semgrep.yml --metrics off --disable-version-check --error --strict --json --output artifacts/security/semgrep.json --exclude '*.test.*' ebkit scripts web/server web/src
+      - name: Check Terraform Dockerfile and Actions configuration
+        run: |
+          checkov -d infra/terraform --framework terraform --skip-path '\.terraform' --quiet --compact -o json --output-file-path artifacts/security/checkov-terraform
+          checkov -f Dockerfile --framework dockerfile --quiet --compact -o json --output-file-path artifacts/security/checkov-docker
+          checkov -d .github/workflows --framework github_actions --quiet --compact -o json --output-file-path artifacts/security/checkov-actions
+      - name: Preserve security results on success or failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: source-and-iac-security-${{ github.sha }}
+          path: artifacts/security/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install and test
+        run: |
+          python -m pip install '.[dev,database]'
+          python -m pytest tests/test_aws_tls.py tests/test_managed_database.py tests/test_cluster_health_poll.py tests/test_controls.py tests/test_production_ops.py tests/test_dashboard_release.py tests/test_git_security.py tests/test_hosted_worker.py tests/test_runtime_secrets.py -q
+          python -m pip install -r security/requirements-sca.txt
+          cd web
+          npm ci
+          EBKIT_TEST_PYTHON="$(command -v python)" npm test -- --pool=threads --maxWorkers=1 --testTimeout=15000
+          npm run build
+          npm audit --omit=dev --audit-level=high
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: '1.14.9'
+      - name: Validate infrastructure without AWS credentials
+        run: |
+          terraform -chdir=infra/terraform fmt -check
+          terraform -chdir=infra/terraform init -backend=false -input=false
+          terraform -chdir=infra/terraform validate
+      - name: Build the application image
+        run: |
+          mkdir -p artifacts
+          docker build --label org.opencontainers.image.revision="${{ github.sha }}" -t ebkit:ci .
+      - name: Audit exact Python dependencies from the runtime image
+        run: |
+          docker run --rm -i --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --entrypoint /opt/ebkit/bin/python ebkit:ci - < scripts/python_inventory.py > artifacts/python-runtime.lock
+          python -m pip_audit --strict --no-deps --disable-pip --progress-spinner off -r artifacts/python-runtime.lock --format json --output artifacts/python-dependencies.json
+      - name: Scan source dependencies and secrets
+        uses: aquasecurity/trivy-action@6abccf398f78b4c337599c0656f933d91efb91a0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          skip-dirs: web/node_modules,artifacts,infra/terraform/.terraform
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          format: json
+          output: artifacts/source-security.json
+      - name: Scan the image before cloud credentials are requested
+        uses: aquasecurity/trivy-action@6abccf398f78b4c337599c0656f933d91efb91a0
+        with:
+          image-ref: ebkit:ci
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          format: json
+          output: artifacts/image-security.json
+      - name: Create software bill of materials
+        uses: aquasecurity/trivy-action@6abccf398f78b4c337599c0656f933d91efb91a0
+        with:
+          image-ref: ebkit:ci
+          format: cyclonedx
+          output: artifacts/sbom.cdx.json
+      - name: Passive DAST against the isolated public demo container
+        run: |
+          mkdir -p artifacts/dast
+          chmod a+w artifacts/dast
+          docker network create ebkit-security
+          docker run -d --name ebkit-dast --network ebkit-security --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m --tmpfs /app/web/server/.jobs:rw,noexec,nosuid,size=32m,uid=1000,gid=1000 --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 128 --memory 768m --cpus 1 ebkit:ci
+          for attempt in $(seq 1 30); do
+            if docker exec ebkit-dast node -e "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then break; fi
+            sleep 2
+          done
+          docker exec ebkit-dast node -e "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+          cp security/zap-rules.tsv artifacts/dast/zap-rules.tsv
+          # ZAP 2.17.0: pinned official multi-platform image digest. -I accepts WARN,
+          # but FAIL findings and scanner errors still fail this step.
+          docker run --rm --network ebkit-security --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 512 --memory 2g -v "$PWD/artifacts/dast:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy@sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6 zap-baseline.py -t http://ebkit-dast:8080 -m 1 -I -c /zap/wrk/zap-rules.tsv -J zap.json -r zap.html
+      - name: Preserve DAST evidence and clean up its containers
+        if: always()
+        run: |
+          if docker container inspect ebkit-dast >/dev/null 2>&1; then
+            docker logs ebkit-dast > artifacts/dast/container.log 2>&1
+            docker rm -f ebkit-dast
+          fi
+          if docker network inspect ebkit-security >/dev/null 2>&1; then docker network rm ebkit-security; fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: passive-dast-${{ github.sha }}
+          path: artifacts/dast/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Save the scanned image
+        run: docker save ebkit:ci -o artifacts/image.tar
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-image-${{ github.sha }}
+          path: artifacts/image.tar
+          retention-days: 1
+      - name: Preserve security reports even if a scan fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: security-reports-${{ github.sha }}
+          path: artifacts/*.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  deploy:
+    concurrency:
+      group: ebkit-production-deployment
+      cancel-in-progress: false
+    needs: [verify, security]
+    if: github.event_name != 'pull_request' && github.ref_name == vars.DEPLOYMENT_BRANCH
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-image-${{ github.sha }}
+          path: artifacts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: passive-dast-${{ github.sha }}
+          path: artifacts/dast
+      - name: Load the already scanned image
+        run: |
+          docker load -i artifacts/image.tar
+          python -m pip install boto3
+      - name: Install pinned Cluster-compatible AWS CLI
+        run: |
+          curl --fail --silent --show-error --location --retry 3 https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.37.10.zip -o "$RUNNER_TEMP/awscli.zip"
+          echo "1aaed142cb63294e41ef70431fe9c602dbb869f8a21b6b8fc9d5ffd53b5c9235  $RUNNER_TEMP/awscli.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/awscli.zip" -d "$RUNNER_TEMP/awscli-install"
+          sudo "$RUNNER_TEMP/awscli-install/aws/install" --update
+          aws --version
+      - name: Reject retries of superseded branch commits
+        run: |
+          CURRENT_SHA=$(git ls-remote origin "$GITHUB_REF" | cut -f1)
+          test "$CURRENT_SHA" = "$GITHUB_SHA" || { echo "This commit has been superseded; deploy the current branch head."; exit 1; }
+      - name: Exchange the GitHub OIDC token for short lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: github-${{ github.run_id }}
+          role-duration-seconds: 3600
+          mask-aws-account-id: true
+      - name: Publish an immutable image and deploy its digest
+        env:
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          EB_CLUSTER_STACK: ${{ vars.EB_CLUSTER_STACK }}
+          EBKIT_EXPECT_LIVE_ENABLED: ${{ vars.EB_LIVE_ENABLED || 'false' }}
+          EB_APPLICATION: ${{ vars.EB_APPLICATION }}
+          EB_ENVIRONMENT: ${{ vars.EB_ENVIRONMENT }}
+        run: |
+          REGISTRY="${ECR_REPOSITORY%%/*}"
+          TAG="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
+          docker tag ebkit:ci "$ECR_REPOSITORY:$TAG"
+          docker push "$ECR_REPOSITORY:$TAG"
+          DIGEST=$(aws ecr describe-images --repository-name "${ECR_REPOSITORY#*/}" --image-ids "imageTag=$TAG" --query 'imageDetails[0].imageDigest' --output text)
+          python scripts/release_dashboard.py --image "$ECR_REPOSITORY@$DIGEST"
+      - name: Capture deployed screenshots and generate the walkthrough
+        run: |
+          python -m pip install playwright==1.64.0 markdown==3.7 pypdfium2==4.30.0 Pillow==11.3.0
+          python -m playwright install --with-deps chromium
+          python scripts/capture_delivery.py
+      - name: Preserve deployment and smoke test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: deployment-evidence-${{ github.sha }}
+          path: |
+            artifacts/release-*.json
+            artifacts/devops-document/
+          if-no-files-found: ignore
+          retention-days: 7

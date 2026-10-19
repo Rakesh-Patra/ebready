@@ -1,0 +1,45 @@
+rules:
+  - id: python-dynamic-code
+    languages: [python]
+    severity: ERROR
+    message: Avoid evaluating source strings; parse data or dispatch reviewed operations.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+  - id: python-shell-command
+    languages: [python]
+    severity: ERROR
+    message: Pass an argument list to subprocess with shell disabled.
+    pattern: subprocess.$FUNC(..., shell=True, ...)
+  - id: python-disabled-tls
+    languages: [python]
+    severity: ERROR
+    message: Preserve TLS certificate verification and configure a trusted CA bundle.
+    pattern: $CLIENT.$FUNC(..., verify=False, ...)
+  - id: python-unsafe-yaml
+    languages: [python]
+    severity: ERROR
+    message: Use yaml.safe_load for external YAML.
+    pattern-either:
+      - pattern: yaml.unsafe_load(...)
+      - pattern: yaml.load(..., Loader=yaml.Loader, ...)
+      - pattern: yaml.load(..., Loader=yaml.UnsafeLoader, ...)
+  - id: python-pickle-input
+    languages: [python]
+    severity: ERROR
+    message: Do not deserialize pickle data across a trust boundary; use validated JSON.
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+  - id: javascript-dynamic-code
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: Avoid executing source strings; use explicit validated operations.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: new Function(...)
+  - id: javascript-disabled-tls
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: Do not disable TLS certificate checks.
+    pattern: '{rejectUnauthorized: false, ...}'

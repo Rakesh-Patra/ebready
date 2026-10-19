@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 const auth = vi.hoisted(() => ({ signUp: vi.fn(), signInWithPassword: vi.fn(), verifyEmail: vi.fn(), sendResetPasswordEmail: vi.fn(), exchangeResetPasswordToken: vi.fn(), resetPassword: vi.fn() }));
-vi.mock('./lib', () => ({ insforge: { auth }, message: (error: Error) => error.message }));
+vi.mock('./lib', () => ({ publicDemo: false, insforge: { auth }, message: (error: Error) => error.message }));
 import AuthDialog from './AuthDialog';
 beforeEach(() => vi.clearAllMocks()); afterEach(cleanup);
 it('logs in with email and password and loads the authenticated account', async () => {
