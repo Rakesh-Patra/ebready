@@ -1,27 +1,39 @@
 version: 2
+
+# One routine maintenance PR across ecosystems. Major upgrades need a separate
+# compatibility review; dependency alerts and security-update PRs remain enabled.
+multi-ecosystem-groups:
+  maintenance:
+    schedule:
+      interval: weekly
+
 updates:
   - package-ecosystem: docker
     directory: /
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: maintenance
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
   - package-ecosystem: github-actions
     directory: /
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: maintenance
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
   - package-ecosystem: npm
     directory: /web
-    schedule:
-      interval: weekly
-    groups:
-      react-runtime:
-        patterns:
-          - react
-          - react-dom
+    patterns: ["*"]
+    multi-ecosystem-group: maintenance
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
   - package-ecosystem: pip
+    # The root updater already discovers security/requirements.txt.
     directory: /
-    schedule:
-      interval: weekly
-  - package-ecosystem: pip
-    directory: /security
-    schedule:
-      interval: weekly
+    patterns: ["*"]
+    multi-ecosystem-group: maintenance
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]

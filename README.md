@@ -10,15 +10,19 @@ EBKit generates and checks Docker deployment kits and manages AWS Elastic Beanst
 
 **Start here:** [Features explained simply](docs/FEATURES.md) | [CLI guide](docs/CLI.md) | [Web guide](web/README.md) | [Database, monitoring and cost tools](docs/OPERATIONS.md) | [Initialization](docs/initialization.md)
 
-For hosting this dashboard on Standard Elastic Beanstalk with the root Dockerfile,
+For hosting this dashboard on Elastic Beanstalk Cluster Mode with the root Dockerfile,
 Terraform, GitHub OIDC, Secrets Manager and CloudWatch, follow the
 [DevOps implementation and deployment walkthrough](docs/DEVOPS-HACKATHON-GUIDE.md).
 The current infrastructure follows the [HTTPS Cluster Mode migration](docs/CLUSTER-MIGRATION.md).
 Download the [verified walkthrough PDF with seven real screenshots](docs/EBKit-DevOps-Guide.pdf).
-Its public demo disables login and cloud/AI operations until HTTPS is configured.
-This hosting setup is separate from the customer Cluster Mode deployment engine.
+The hosted pilot enables login over HTTPS and applies the existing email roles.
+Demo mode supports exploration without creating AWS resources. See the
+[architecture diagram](docs/EBKit-Architecture.png) and
+[hosted verification notes](docs/HOSTED-PILOT.md).
 See [Git and application security](docs/DEVSECOPS.md) for commit hooks, secret
 scanning, SAST/SCA, Checkov, passive DAST and the solo-maintainer protection policy.
+See [repository maintenance](docs/REPOSITORY-MAINTENANCE.md) for the single workflow,
+grouped dependency updates, and short-lived branch policy.
 
 Automated tests cover local behavior and mocked AWS integrations. Live AWS integration tests are still required. AWS resources incur charges; external databases and snapshots persist independently of environment teardown. Cost reports explicitly identify attribution limits.
 
@@ -28,7 +32,7 @@ Automated tests cover local behavior and mocked AWS integrations. Live AWS integ
 
 EBKit is a command-line tool for preparing applications and deploying a **public GitHub repository or reviewed project ZIP** to **AWS Elastic Beanstalk Cluster Mode**. The deployment flow is intentionally simple: give EBKit a GitHub URL and the container port; AWS CodeBuild builds the repository's root-level `Dockerfile`, pushes the image to ECR, and Elastic Beanstalk deploys it.
 
-EBKit runs on your computer and deploys to **your AWS account**. It is not a hosted deployment service. AWS resources may incur charges.
+The CLI runs on your computer and deploys to **your AWS account**. The optional hosted web worker deploys into its operator's account for approved users. AWS resources may incur charges.
 
 The [EBKit web dashboard](web/README.md) adds InsForge accounts and project storage, Google sign-in, email registration/login, GitHub validation and an authenticated worker for live AWS deployment controls. Demo mode remains available for testing without AWS actions. Live mode uses the server operator's AWS account and may incur charges.
 
