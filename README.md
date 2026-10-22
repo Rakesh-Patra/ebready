@@ -92,8 +92,8 @@ resources.
    Dockerfile at the repository root, skip to step 3. Otherwise, from the application
    folder run `ebkit init --path .`. Init may need a configured AI provider; Gemini is
    the default supported provider. Review the generated Dockerfile and files, test the
-   application, then commit and push them to GitHub. GitHub links are deployment-only;
-   use a local directory or ZIP for init.
+   application, then commit and push them to GitHub. You can also clone and prepare
+   a repository with `ebkit init --repo https://github.com/OWNER/REPOSITORY`.
    Init does not deploy the app or provision its database.
 
 3. **Deploy the public GitHub repository.** Replace the URL, app name, environment,
@@ -373,8 +373,22 @@ CodeBuild builds ZIP source from private encrypted S3 storage. No local Docker b
 
 ## Generate deployment files with `ebkit init`
 
+Hosted ZIP and GitHub snapshot preparation uses a pinned Trivy binary to scan
+resolved source dependencies without Docker or executing uploaded code. The gate
+requires zero Critical and at most five High findings. Missing scanner/database,
+unreadable reports, and projects without supported resolved dependencies remain
+unverified and blocked. Include a supported lockfile and retry preparation.
+This source scan does not certify the final container image or its operating-system
+packages. Local CLI initialization continues to use Docker Scout.
+
 Run `ebkit init --path .` for a local project or `ebkit init --zip project.zip` for
-a ZIP. GitHub links are deployment-only. Init generates or validates deployment files, including
+a ZIP, or `ebkit init --repo https://github.com/OWNER/REPOSITORY` to clone and prepare
+a GitHub project. Interactive `ebkit init` offers all three source types. GitHub clones
+are retained in a new repository-named folder; use `--output` to choose a new destination.
+Existing clone destinations are refused. Review generated changes before committing
+and pushing them; init never pushes automatically. ZIP init retains an extracted
+folder and exports a `-prepared.zip` when a root Dockerfile is available.
+Init generates or validates deployment files, including
 a root Dockerfile; it does not deploy the app or provision databases. Docker Scout
 scans source dependencies by default; local build/runtime verification is optional.
 

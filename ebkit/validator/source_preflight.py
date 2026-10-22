@@ -1,6 +1,7 @@
 """Expose the same source-only Scout validation used by local init."""
 import argparse
 import json
+import os
 from dataclasses import asdict
 from pathlib import Path
 from ebkit.validator.docker_validator import DockerScoutValidator, ScoutResult
@@ -10,6 +11,10 @@ def main() -> None:
     parser.add_argument('--path',required=True)
     options=parser.parse_args()
     root=Path(options.path).resolve()
+    if os.environ.get('EBKIT_SOURCE_SCANNER') == 'trivy':
+        from ebkit.validator.hosted_source import scan_source
+        print(json.dumps(scan_source(root)))
+        return
     validator=DockerScoutValidator(max_critical=0,max_high=5)
     available=validator.is_scout_available()
     result=validator.scan_source(root) if available else ScoutResult(gate_passed=False,artifact_kind='source',summary='Docker Scout is unavailable. Source security validation: NOT VERIFIED.',gate_reason='Install and configure Docker Scout before deploying, or explicitly acknowledge a security bypass.')

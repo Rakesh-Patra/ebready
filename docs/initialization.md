@@ -67,9 +67,18 @@ ZIP init safely extracts source, generates deployment files and exports a prepar
 For hosted init using the operator Gemini key, configure `EBKIT_SERVICE_URL` and
 `EBKIT_ACCESS_TOKEN` from an approved website session; no user AI key is needed.
 
-GitHub links are deployment-only. Create and review the Dockerfile locally, push it
-to GitHub, then run `ebkit deploy https://github.com/OWNER/REPOSITORY`.
-The old `init --repo` option now returns this guidance rather than cloning/analyzing a URL.
+Or clone and initialize a GitHub project:
+
+```powershell
+ebkit init --repo https://github.com/OWNER/REPOSITORY
+```
+
+The clone is retained in a new repository-named folder. Use `--output` to select
+another new folder; existing destinations are refused. Review the Dockerfile and
+generated files, test the application, then commit and push the changes yourself
+before deploying the GitHub URL. Init never pushes automatically.
+Interactive `ebkit init` also offers GitHub and ZIP source options. ZIP selection
+uses the same extraction, generation, and prepared-archive export as `--zip`.
 
 ## AI provider
 

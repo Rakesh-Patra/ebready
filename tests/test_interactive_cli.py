@@ -236,14 +236,18 @@ class TestInteractiveCLI:
         assert "FRONTEND_HOST_PORT=" in env_file
         assert ".env" in (sample_project / ".gitignore").read_text(encoding="utf-8")
 
-    def test_interactive_github_link_is_deployment_only(self, monkeypatch, tmp_path: Path):
+    def test_interactive_github_clones_and_retains_project(self, monkeypatch, tmp_path: Path):
         monkeypatch.chdir(tmp_path)
-        with patch('ebkit.repo_handler.safe_clone_repo') as clone:
-            result=CliRunner().invoke(init_command, input='2\n')
+        def clone_source(url, destination):
+            destination.mkdir()
+            (destination / 'app.py').write_text('print("hello")')
+            return destination
+        with patch('ebkit.repo_handler.safe_clone_repo', side_effect=clone_source) as clone, patch('ebkit.commands.init._check_gemini_key', side_effect=RuntimeError('stop before AI')):
+            result=CliRunner().invoke(init_command, ['--analyzer','gemini'], input='2\nhttps://github.com/test-owner/test-repo\n')
         assert result.exit_code != 0
-        assert 'GitHub links are for deployment only' in result.output
-        assert 'review and push' in result.output
-        clone.assert_not_called()
+        assert 'Cloned project:' in result.output
+        assert (tmp_path / 'test-repo' / 'app.py').is_file()
+        clone.assert_called_once()
 
     def test_github_repo_clone_does_not_overwrite_existing_folder(self, monkeypatch, tmp_path: Path):
         """GitHub init refuses to use an existing repository-named directory."""
@@ -261,7 +265,7 @@ class TestInteractiveCLI:
             )
 
         assert result.exit_code != 0
-        assert "GitHub links are for deployment only" in result.output
+        assert "Clone destination already exists" in result.output
         assert existing_file.read_text(encoding="utf-8") == "keep"
         mock_clone.assert_not_called()
 
@@ -325,7 +329,7 @@ class TestInteractiveCLI:
         runner = CliRunner()
         result = runner.invoke(init_command, input="9\n")
         assert result.exit_code != 0
-        assert "❌ Invalid selection: '9'. Please select 1, 2, or 3." in result.output
+        assert "❌ Invalid selection: '9'. Please select 1, 2, 3, or 4." in result.output
 
     def test_invalid_local_path(self, monkeypatch, tmp_path: Path):
         """Non-existent local project path exits with clear error."""
@@ -346,7 +350,7 @@ class TestInteractiveCLI:
         runner = CliRunner()
         result = runner.invoke(init_command, input="2\nhttps://evil-site.com/exploit\n")
         assert result.exit_code != 0
-        assert "GitHub links are for deployment only" in result.output
+        assert "Unsupported host" in result.output
 
     def test_missing_gemini_key(self, sample_project: Path, monkeypatch, tmp_path: Path):
         """Selecting Gemini when GEMINI_API_KEY is missing prints clear message and exits."""
@@ -455,7 +459,7 @@ class TestInteractiveCLI:
         runner = CliRunner()
         result = runner.invoke(init_command, ["--yes"])
         assert result.exit_code != 0
-        assert "❌ Non-interactive mode requires --path or --zip." in result.output
+        assert "❌ Non-interactive mode requires --path, --repo or --zip." in result.output
 
     def test_non_interactive_with_path_succeeds(self, sample_project: Path, tmp_path: Path, monkeypatch):
         """Non-interactive mode with path and Gemini analyzer succeeds without prompts."""

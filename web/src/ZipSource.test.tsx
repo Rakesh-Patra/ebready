@@ -8,6 +8,11 @@ const api=vi.hoisted(()=>({backend:vi.fn(),uploadZip:vi.fn(),downloadPreparedZip
 vi.mock('./lib',()=>({...api,message:(error:Error)=>error.message}));
 afterEach(()=>{cleanup();vi.clearAllMocks();});
 const draft={uploadId:'upload',name:'app.zip',dockerfile:'FROM node:22-alpine\nCMD ["node","app.js"]',reviewHash:'hash',generated:true,port:3000,environment:[],environmentScanComplete:true,scout:{gate_passed:true,summary:'Source gate passed',details:[]}};
+it('does not show zero CVE counts when the scanner is unavailable',()=>{
+  render(<ZipSource prepared={{...draft,scout:{gate_passed:false,available:false,critical_count:0,high_count:0,summary:'Scan incomplete',details:[]}}} onPrepared={vi.fn()} reviewed={false} onReviewed={vi.fn()} signedIn login={vi.fn()} port={3000} onPort={vi.fn()}/>);
+  expect(screen.getByText('Security check incomplete')).toBeTruthy();
+  expect(screen.queryByText('0 Critical / 0 High')).toBeNull();
+});
 it('requires consent before preparing a ZIP and passes the draft for review',async()=>{
   const user=userEvent.setup(),onPrepared=vi.fn();api.uploadZip.mockResolvedValue({uploadId:'upload'});api.backend.mockResolvedValue(draft);
   render(<ZipSource prepared={null} onPrepared={onPrepared} reviewed={false} onReviewed={vi.fn()} signedIn login={vi.fn()} port={3000} onPort={vi.fn()}/>);
