@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 
 
@@ -29,6 +30,8 @@ def scan_source(root: Path) -> dict:
             result = subprocess.run(command, cwd=directory, env=env, capture_output=True,
                 text=True, encoding='utf-8', errors='replace', timeout=195)
         if result.returncode:
+            if os.environ.get('EBKIT_SCANNER_DIAGNOSTICS') == 'true':
+                print(result.stderr[-4000:], file=sys.stderr)
             return incomplete
         report = json.loads(result.stdout)
         results = report.get('Results')

@@ -95,7 +95,7 @@ jobs:
           python -m pip_audit --strict --no-deps --disable-pip --progress-spinner off -r artifacts/python-runtime.lock --format json --output artifacts/python-dependencies.json
       - name: Verify hosted scanner works without Docker or privileged access
         run: |
-          docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=1g --cap-drop ALL --security-opt no-new-privileges:true --memory 2g -e EBKIT_JOBS_DIR=/tmp --entrypoint /opt/ebkit/bin/python ebkit:ci -m ebkit.validator.source_preflight --path /app/web > artifacts/hosted-source-scan.json
+          docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=1g --cap-drop ALL --security-opt no-new-privileges:true --memory 2g -e EBKIT_JOBS_DIR=/tmp -e EBKIT_SCANNER_DIAGNOSTICS=true --entrypoint /opt/ebkit/bin/python ebkit:ci -m ebkit.validator.source_preflight --path /app/web > artifacts/hosted-source-scan.json
           python -c "import json; r=json.load(open('artifacts/hosted-source-scan.json')); assert r.get('available') is True and r.get('scanner') == 'trivy', r; print(r['summary'])"
       - name: Scan source dependencies and secrets
         uses: aquasecurity/trivy-action@6abccf398f78b4c337599c0656f933d91efb91a0
