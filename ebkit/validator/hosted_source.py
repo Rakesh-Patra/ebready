@@ -22,10 +22,11 @@ def scan_source(root: Path) -> dict:
             (trusted / 'config.yaml').write_text('{}', encoding='utf-8')
             (trusted / 'ignore').write_text('', encoding='utf-8')
             env = {k: v for k, v in os.environ.items() if not k.startswith('TRIVY_')}
+            env.update(GOMEMLIMIT='384MiB', GOMAXPROCS='2')
             cache = Path(os.environ.get('EBKIT_JOBS_DIR', tempfile.gettempdir())) / '.trivy-cache'
             command = ['trivy', '--config', str(trusted / 'config.yaml'), 'fs',
                 '--scanners', 'vuln', '--pkg-types', 'library', '--format', 'json',
-                '--list-all-pkgs', '--offline-scan', '--ignorefile', str(trusted / 'ignore'),
+                '--list-all-pkgs', '--offline-scan', '--parallel', '1', '--no-progress', '--ignorefile', str(trusted / 'ignore'),
                 '--cache-dir', str(cache), '--timeout', '180s', str(root.resolve())]
             result = subprocess.run(command, cwd=directory, env=env, capture_output=True,
                 text=True, encoding='utf-8', errors='replace', timeout=195)
