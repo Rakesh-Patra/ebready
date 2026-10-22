@@ -43,7 +43,7 @@ export default function ZipSource({prepared,onPrepared,reviewed,onReviewed,signe
         {prepared.scout?.gate_passed?<ShieldCheck size={21}/>:<ShieldAlert size={21}/>}
         <div><strong>{prepared.scout?.bypassed?'Security check skipped':prepared.scout?.gate_passed?'Source security check passed':prepared.scout?.available===false?'Security check incomplete':'Security fixes needed'}</strong>
         {prepared.scout?.bypassed?<p>Security is NOT VERIFIED. Vulnerabilities may remain.</p>:!prepared.scout?.gate_passed?<p>{prepared.scout?.available===false?'Prepare the ZIP again to retry the check.':'Update vulnerable dependencies, then upload a new ZIP. Deployment is blocked.'}</p>:null}
-        {!prepared.scout?.gate_passed&&!prepared.scout?.bypassed&&typeof prepared.scout?.critical_count==='number'&&<span className="security-counts">{prepared.scout.critical_count} Critical / {prepared.scout.high_count??0} High</span>}</div>
+        {!prepared.scout?.gate_passed&&!prepared.scout?.bypassed&&prepared.scout?.available!==false&&typeof prepared.scout?.critical_count==='number'&&<span className="security-counts">{prepared.scout.critical_count} Critical / {prepared.scout.high_count??0} High</span>}</div>
       </div>
       {!reviewed&&!dockerfileOpen&&<button className="button primary review-continue" onClick={()=>setDockerfileOpen(true)}>Review Dockerfile to continue</button>}
       <details className="review-section" open={dockerfileOpen} onToggle={event=>setDockerfileOpen(event.currentTarget.open)}><summary>View Dockerfile {reviewed&&<span>Reviewed</span>}</summary>

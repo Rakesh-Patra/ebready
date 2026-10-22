@@ -308,16 +308,68 @@ def _print_ebready_plan(
 # ---------------------------------------------------------------------------
 
 
-def _prompt_project_source() -> tuple[Path, Optional[str], str]:
+def _clone_init_source(url: str, output: Optional[str] = None, dry_run: bool = False) -> Path:
+    from ebkit.repo_handler import safe_clone_repo
+    valid, reason = validate_github_url(url)
+    if not valid:
+        raise click.UsageError(reason)
+    if dry_run:
+        import tempfile
+        temporary = tempfile.TemporaryDirectory(prefix='ebkit-repo-preview-')
+        click.get_current_context().call_on_close(temporary.cleanup)
+        destination = Path(temporary.name) / 'project'
+    else:
+        name = urlsplit(url.strip()).path.rstrip('/').split('/')[-1]
+        name = name.removesuffix('.git')
+        destination = Path(output) if output else Path.cwd() / name
+    if destination.exists():
+        raise click.UsageError(f'Clone destination already exists: {destination}. Choose a new --output directory.')
+    try:
+        project = safe_clone_repo(url, destination)
+    except (ValueError, RuntimeError) as error:
+        raise click.ClickException(str(error)) from None
+    click.echo(f'Cloned project: {project}\nGenerated files remain local; review before committing or deploying.')
+    return project
+
+
+def _extract_init_source(source_zip: str, output: Optional[str], dry_run: bool) -> Path:
+    from ebkit.source_bundle import extract_zip, make_zip
+    import zipfile
+    archive = Path(source_zip)
+    if dry_run:
+        import tempfile
+        temporary = tempfile.TemporaryDirectory(prefix='ebkit-zip-preview-')
+        click.get_current_context().call_on_close(temporary.cleanup)
+        destination = Path(temporary.name) / 'project'
+    else:
+        destination = Path(output) if output else archive.with_name(archive.stem + '-ebkit')
+    try:
+        project = extract_zip(archive, destination)
+    except (ValueError, OSError, zipfile.BadZipFile) as error:
+        raise click.ClickException(str(error)) from None
+    def export_zip():
+        if not dry_run and (destination / 'Dockerfile').is_file():
+            target = archive.with_name(archive.stem + '-prepared.zip')
+            if target.exists():
+                click.echo(f'Prepared ZIP not overwritten: {target}. Archive the initialized folder yourself.')
+                return
+            make_zip(destination, target)
+            click.echo(f'Prepared project ZIP: {target}\nReview its root Dockerfile before deploying. Security findings above still apply.')
+    click.get_current_context().call_on_close(export_zip)
+    return project
+
+
+def _prompt_project_source(output: Optional[str] = None, dry_run: bool = False) -> tuple[Path, Optional[str], str]:
     """
     Prompt user for project source.
-    Returns (repo_path, cleanup_path, repo_label). GitHub links are deploy-only.
+    Returns (repo_path, cleanup_path, repo_label). Prepared sources are retained.
     """
     click.echo("🚀 Welcome to EBReady\n")
     click.echo("Where is your project?\n")
     click.echo("1. Current directory")
-    click.echo("2. GitHub deployment guidance")
-    click.echo("3. Local project path\n")
+    click.echo("2. GitHub repository (clone and prepare)")
+    click.echo("3. Local project path")
+    click.echo("4. Project ZIP\n")
 
     choice = click.prompt("Select", default="1", show_default=True).strip()
 
@@ -327,7 +379,14 @@ def _prompt_project_source() -> tuple[Path, Optional[str], str]:
         return repo_path, None, "."
 
     if choice == "2":
-        raise click.UsageError('GitHub links are for deployment only. Run ebkit init --path locally, review and push the files, then use ebkit deploy URL. Use --zip for ZIP init.')
+        url = click.prompt('GitHub repository URL').strip()
+        project = _clone_init_source(url, output, dry_run)
+        return project, None, url
+
+    if choice == "4":
+        archive = click.prompt('Project ZIP path', type=click.Path(exists=True, dir_okay=False, resolve_path=True))
+        project = _extract_init_source(archive, output, dry_run)
+        return project, None, str(project)
 
     if choice == "3":
         click.echo("Local project path:")
@@ -341,7 +400,7 @@ def _prompt_project_source() -> tuple[Path, Optional[str], str]:
             sys.exit(1)
         return local_p, None, str(local_p)
 
-    click.echo(f"\n❌ Invalid selection: '{choice}'. Please select 1, 2, or 3.", err=True)
+    click.echo(f"\n❌ Invalid selection: '{choice}'. Please select 1, 2, 3, or 4.", err=True)
     sys.exit(1)
 
 
@@ -444,7 +503,7 @@ def _prompt_ai_provider(default_choice: str = "1") -> str:
     "--repo",
     "-r",
     default=None,
-    help="Deprecated: GitHub links are deployment-only. Use --path or --zip for init.",
+    help="Clone a GitHub repository locally and prepare deployment files for review.",
 )
 @click.option(
     "--output",
@@ -546,8 +605,6 @@ def init_command(
     """
     tmp_clone_dir: Optional[str] = None
     repo_label: str = ""
-    if repo:
-        raise click.UsageError('GitHub links are for deployment only. Create and review the root Dockerfile locally, push it, then run ebkit deploy URL. Use --path or --zip for init.')
     if sum(bool(value) for value in (path, repo, source_zip)) > 1:
         raise click.UsageError('Choose only one of --path, --repo or --zip.')
     if service_url:
@@ -565,30 +622,11 @@ def init_command(
         hosted_init(source_zip, output, service_url, port, skip_scout=scout is False)
         return
     if source_zip:
-        from ebkit.source_bundle import extract_zip, make_zip
-        import zipfile
-        archive = Path(source_zip)
-        if dry_run:
-            import tempfile
-            temporary = tempfile.TemporaryDirectory(prefix='ebkit-zip-preview-')
-            click.get_current_context().call_on_close(temporary.cleanup)
-            destination = Path(temporary.name) / 'project'
-        else:
-            destination = Path(output) if output else archive.with_name(archive.stem + '-ebkit')
-        try:
-            path = str(extract_zip(archive, destination))
-        except (ValueError, OSError, zipfile.BadZipFile) as error:
-            raise click.ClickException(str(error)) from None
+        path = str(_extract_init_source(source_zip, output, dry_run))
         output = path
-        def export_zip():
-            if not dry_run and (destination / 'Dockerfile').is_file():
-                target = archive.with_name(archive.stem + '-prepared.zip')
-                if target.exists():
-                    click.echo(f'Prepared ZIP not overwritten: {target}. Archive the initialized folder yourself.')
-                    return
-                make_zip(destination, target)
-                click.echo(f'Prepared project ZIP: {target}\nReview its root Dockerfile before deploying. Security findings above still apply.')
-        click.get_current_context().call_on_close(export_zip)
+    if repo:
+        path = str(_clone_init_source(repo, output, dry_run))
+        output = path
     if build is False and runtime is True:
         raise click.UsageError("--runtime cannot be combined with --no-build.")
     saved_cfg = load_config()
@@ -596,7 +634,7 @@ def init_command(
     # ── Non-interactive / CI Mode Validation ───────────────────────────────
     if yes:
         if not path:
-            click.echo("\n❌ Non-interactive mode requires --path or --zip.", err=True)
+            click.echo("\n❌ Non-interactive mode requires --path, --repo or --zip.", err=True)
             sys.exit(1)
 
         repo_path = Path(path).resolve()
@@ -621,7 +659,9 @@ def init_command(
             repo_path = Path(path).resolve()
             repo_label = str(repo_path)
         else:
-            repo_path, tmp_clone_dir, repo_label = _prompt_project_source()
+            repo_path, tmp_clone_dir, repo_label = _prompt_project_source(output, dry_run)
+            if dry_run:
+                output = str(repo_path)
 
         # Check saved configuration
         if saved_cfg and not analyzer:

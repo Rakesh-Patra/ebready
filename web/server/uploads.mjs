@@ -174,7 +174,7 @@ export function createUploads(config,dependencies={}) {
         record.scout={gate_passed:false,bypassed:true,artifact_kind:'source',summary:'SECURITY VALIDATION SKIPPED: Docker Scout was explicitly bypassed. Security readiness is NOT VERIFIED; CVEs may remain.',details:[]};
       }else{
         try{record.scout=await scout(path.join(directory,'project'));}
-        catch{record.scout={gate_passed:false,available:false,artifact_kind:'source',summary:'Docker Scout could not finish. Security readiness is NOT VERIFIED.',gate_reason:'Check Docker Scout configuration and try again.',details:[]};}
+        catch{record.scout={gate_passed:false,available:false,artifact_kind:'source',summary:'Dependency scan could not finish. Security readiness is NOT VERIFIED.',gate_reason:'Check the source scanner configuration and try again.',details:[]};}
         // Derive the gate on this server, with the same thresholds as local init.
         const report=record.scout;
         report.gate_passed=report.gate_passed===true&&report.available!==false&&Number.isInteger(report.critical_count)&&Number.isInteger(report.high_count)&&report.critical_count===0&&report.high_count>=0&&report.high_count<=5;
