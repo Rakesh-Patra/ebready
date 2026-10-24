@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS frontend
+FROM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS frontend
 WORKDIR /build/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
@@ -8,7 +8,7 @@ ARG VITE_INSFORGE_ANON_KEY
 ENV VITE_INSFORGE_URL=$VITE_INSFORGE_URL VITE_INSFORGE_ANON_KEY=$VITE_INSFORGE_ANON_KEY
 RUN npm run build
 
-FROM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS runtime
+FROM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 # Cluster Mode image registration requires a CLI newer than the SDK's service model.
