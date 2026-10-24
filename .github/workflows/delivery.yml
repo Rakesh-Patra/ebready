@@ -100,7 +100,7 @@ jobs:
           docker run --rm --read-only -v "$RUNNER_TEMP/ebkit-scanner:/tmp:rw" --cap-drop ALL --security-opt no-new-privileges:true --memory 1g -e EBKIT_JOBS_DIR=/tmp -e EBKIT_SCANNER_DIAGNOSTICS=true --entrypoint /opt/ebkit/bin/python ebkit:ci -m ebkit.validator.source_preflight --path /app/web > artifacts/hosted-source-scan.json
           python -c "import json; r=json.load(open('artifacts/hosted-source-scan.json')); assert r.get('available') is True and r.get('scanner') == 'trivy', r; print(r['summary'])"
       - name: Scan source dependencies and secrets
-        uses: aquasecurity/trivy-action@6abccf398f78b4c337599c0656f933d91efb91a0
+        uses: aquasecurity/trivy-action@8f28faec26515256b6d22074d1d2a8986f4cbd87
         with:
           scan-type: fs
           scan-ref: .
@@ -112,7 +112,7 @@ jobs:
           format: json
           output: artifacts/source-security.json
       - name: Scan the image before cloud credentials are requested
-        uses: aquasecurity/trivy-action@6abccf398f78b4c337599c0656f933d91efb91a0
+        uses: aquasecurity/trivy-action@8f28faec26515256b6d22074d1d2a8986f4cbd87
         with:
           image-ref: ebkit:ci
           scanners: vuln,secret
@@ -122,7 +122,7 @@ jobs:
           format: json
           output: artifacts/image-security.json
       - name: Create software bill of materials
-        uses: aquasecurity/trivy-action@6abccf398f78b4c337599c0656f933d91efb91a0
+        uses: aquasecurity/trivy-action@8f28faec26515256b6d22074d1d2a8986f4cbd87
         with:
           image-ref: ebkit:ci
           format: cyclonedx
